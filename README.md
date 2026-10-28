@@ -7,7 +7,7 @@ Speak or type invoice details → review → creates a **draft** in ALLDATA Shop
 1. `npm install` (uses your installed Google Chrome — no Playwright browser download needed)
 2. Put `OPENAI_API_KEY=...` in `.env.local`
 3. `npm run browser` — opens Chrome with a local profile (`.browser-profile/`). Log in to ALLDATA there once.
-4. `npm run dev` — open http://localhost:3000
+4. `npm run build && npm start` — open http://localhost:3000 (`npm run dev` while developing)
 
 Keep the Chrome window open while using the app; requests go through its logged-in session.
 
@@ -25,7 +25,11 @@ Say the customer name and/or phone, car, plate, mileage and repairs. Anything ca
 
 ## WhatsApp voice notes
 
-Mechanics send a voice note to the shop's WhatsApp number; it lands in the **Inbox** on the web page already transcribed and reviewed. The front desk clicks **Review**, checks it as usual and creates the draft; the sender gets a "Draft #… created" reply. Nothing is sent to ALLDATA until someone clicks Create. Notes are stored in `inbox/` (ignored by git). **Upload audio** adds a note by hand, for testing without WhatsApp.
+Mechanics send a voice note to the shop's WhatsApp number; it lands in the **Inbox** on the web page already transcribed and reviewed. The front desk clicks **Review**, checks it as usual and creates the draft; the sender gets a "Draft #… created" reply. Nothing is sent to ALLDATA until someone clicks Create. Notes are stored in `inbox/` (ignored by git); finished ones are deleted after 30 days. **Upload** adds a voice note or photo by hand, for testing without WhatsApp.
+
+**Review first / Create automatically** (top of the sidebar) picks what happens to a WhatsApp note. With *Create automatically*, a clear note becomes a draft straight away and the sender gets "Draft #… created" with the customer, car and total. A note stays in the inbox for review, and the sender is told why, when there are no services, no customer name or phone, or anything on the review screen's warning list (several customers with that name, a phone number that belongs to someone else, a car ALLDATA doesn't know, a VIN that doesn't match the car that was said). A new Shop Job is added as a custom part instead, because only a person adds to the Shop Job list. Auto-create waits 20 seconds after a note with no photo arrives, in case a photo follows.
+
+**VIN photo (optional):** send a photo of the door-jamb sticker before or after the voice note (within 3 minutes) and the two become one note. The VIN is read while the voice note is transcribed, so it adds little or no wait, then decoded by ALLDATA's VIN lookup (exact vehicle and engine, so only the matching trims are offered) and NHTSA's vPIC (trim hint), both at once. One search finds the car anywhere in the shop. When the draft is created, the VIN is saved on the vehicle if it has none: on a new vehicle as it's added, on one already on file the way Shop Manager's own "update the customer's vehicle too" does, in the draft request itself. A VIN that fails its check digit is shown but never saved, and one that differs from the VIN on file is never overwritten.
 
 Setup (Meta's free test number allows up to 5 recipient phones):
 

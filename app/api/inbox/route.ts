@@ -10,11 +10,12 @@ export async function DELETE() {
   return Response.json({ ok: true });
 }
 
-// Adds a voice note by upload: for testing without WhatsApp, or notes received another way.
+// Adds a voice note or photo by upload: for testing without WhatsApp, or notes received another way.
+// A photo and a voice note uploaded within a few minutes of each other become one note.
 export async function POST(req: Request) {
-  const form = await req.formData();
-  const audio = form.get("audio");
-  if (!(audio instanceof File)) return Response.json({ error: "No audio received." }, { status: 400 });
-  const note = await addNote(String(form.get("from") ?? "upload"), { audio: Buffer.from(await audio.arrayBuffer()), mimeType: audio.type || "audio/webm" });
+  const file = (await req.formData()).get("file");
+  if (!(file instanceof File)) return Response.json({ error: "No file received." }, { status: 400 });
+  const media = { data: Buffer.from(await file.arrayBuffer()), mimeType: file.type || "audio/webm" };
+  const note = await addNote("upload", file.type.startsWith("image/") ? { image: media } : { audio: media });
   return Response.json(note);
 }

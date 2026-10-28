@@ -2,7 +2,8 @@
 // vehicle and Shop Jobs are matched against real ALLDATA data. Anything not said is left out
 // (no customer name, no vehicle, $0 price) so the owner can fill it in on the draft.
 import OpenAI from "openai";
-import { findCustomers, getShopJobs, recentCustomerNames, getVehicles, searchVehicleOptions, type Customer, type DraftItem, type Vehicle, type VehicleOption } from "./alldata";
+import type { Vin } from "./vin";
+import { findByVin, findCustomers, getShopJobs, recentCustomerNames, getVehicles, searchVehicleOptions, type Customer, type DraftItem, type Vehicle, type VehicleOption } from "./alldata";
 
 const MODEL = process.env.OPENAI_MODEL ?? "gpt-4.1-mini";
 const openai = new OpenAI();
@@ -16,7 +17,7 @@ type Extracted = {
 export type ReviewItem = DraftItem & { shopJobPrice: number | null };
 export type Review = {
   customer: { firstName: string; lastName: string; phone: string | null; match: Customer | null };
-  vehicle: { year: string; make: string; model: string; plate: string | null; mileage: number | null; match: Vehicle | null; options: VehicleOption[]; baseOption: number };
+  vehicle: { year: string; make: string; model: string; plate: string | null; mileage: number | null; vin: Vin | null; match: Vehicle | null; options: VehicleOption[]; baseOption: number };
   items: ReviewItem[];
   problems: string[];
 };
@@ -48,7 +49,8 @@ const schema = {
   },
 };
 
-export async function extract(text: string): Promise<Review> {
+// `vin` is what was read from a photo sent with the note, if any.
+export async function extract(text: string, vin: Vin | null = null): Promise<Review> {
   const shopJobs = await getShopJobs();
   const res = await openai.chat.completions.create({
     model: MODEL,
@@ -76,11 +78,11 @@ export async function extract(text: string): Promise<Review> {
     ],
   });
   const data: Extracted = JSON.parse(res.choices[0].message.content!);
-  return resolve(data, shopJobs, text);
+  return resolve(data, shopJobs, text, vin);
 }
 
-async function resolve(data: Extracted, shopJobs: { name: string; price: number }[], text: string): Promise<Review> {
-  const { customer, vehicle, problems } = await matchParty(data.customer, data.vehicle, text);
+async function resolve(data: Extracted, shopJobs: { name: string; price: number }[], text: string, vin: Vin | null): Promise<Review> {
+  const { customer, vehicle, problems } = await matchParty(data.customer, { ...data.vehicle, vin }, text);
 
   const items: ReviewItem[] = data.items.map((i) => {
     const name = i.shopJob ?? (i.newShopJob ? i.description : null);
@@ -96,8 +98,17 @@ export type Party = Pick<Review, "customer" | "vehicle"> & { problems: string[] 
 
 // Finds the customer and their vehicle in ALLDATA. Also re-run from the review screen when the
 // front desk types a name or phone that wasn't in the voice note.
-export async function matchParty(c: Partial<Extracted["customer"]>, v: Partial<Extracted["vehicle"]>, text: string): Promise<Party> {
+export async function matchParty(c: Partial<Extracted["customer"]>, said: Partial<Extracted["vehicle"]> & { vin?: Vin | null }, text: string): Promise<Party> {
   const problems: string[] = [];
+  const vin = said.vin ?? null;
+  // A decoded VIN is exact, so it wins over the year/make/model heard in the note.
+  const v = vin?.year && vin.make && vin.model ? { ...said, year: vin.year, make: vin.make, model: vin.model } : said;
+  if (vin && v !== said && said.model) {
+    const key = (s?: string | null) => (s ?? "").toLowerCase().replace(/[^a-z0-9]/g, "");
+    const same = (!said.year || said.year === vin.year) && (key(vin.model).includes(key(said.model)) || key(said.model).includes(key(vin.model)));
+    if (!same) problems.push(`The photo's VIN is a ${vin.year} ${vin.make} ${vin.model}, but the note says ${[said.year, said.make, said.model].filter(Boolean).join(" ")}. Used the VIN.`);
+  }
+  if (vin && !vin.valid) problems.push(`The VIN read from the photo (${vin.vin}) may be misread; compare it with the photo.`);
   const fullName = [c.firstName, c.lastName].map((x) => x?.trim()).filter(Boolean).join(" ");
   const phone = c.phone?.replace(/\D/g, "") || null;
 
@@ -134,31 +145,43 @@ export async function matchParty(c: Partial<Extracted["customer"]>, v: Partial<E
       if ((await getVehicles(c.id)).some((x) => norm(x.plate) === p)) return [c];
     return [];
   };
-  const [byName, byPhone, byPlate] = await Promise.all([nameSearch(), phoneSearch(), plateSearch()]);
-  const customerMatch = byName.find((x) => byPhone.some((p) => p.id === x.id)) ?? byName[0] ?? byPhone[0] ?? byPlate[0] ?? null;
+  // A VIN finds the car anywhere in the shop in one request.
+  const vinSearch = async () => (vin ? findByVin(vin.vin) : []);
+  const [byName, byPhone, byPlate, byVin] = await Promise.all([nameSearch(), phoneSearch(), plateSearch(), vinSearch()]);
+  const customerMatch = byName.find((x) => byPhone.some((p) => p.id === x.id)) ?? byName[0] ?? byPhone[0] ?? byVin[0] ?? byPlate[0] ?? null;
   if (byName.length > 1 && !byPhone.length) problems.push(`Several customers are named ${fullName}; picked the most recent.`);
+  if (customerMatch && customerMatch === byVin[0] && byVin.length > 1)
+    problems.push(`This VIN is on file for ${byVin.length} customers; picked ${[customerMatch.firstName, customerMatch.lastName].filter(Boolean).join(" ")}.`);
+  if (byName.length && byPhone.length && !byName.some((x) => byPhone.some((p) => p.id === x.id)))
+    problems.push(`The phone number belongs to ${byPhone[0].firstName} ${byPhone[0].lastName}, not ${fullName}; picked by name.`);
 
   let vehicleMatch: Vehicle | null = null;
   if (customerMatch) {
     const vehicles = await getVehicles(customerMatch.id);
     vehicleMatch =
+      (vin && vehicles.find((x) => x.vin === vin.vin)) ||
       (v.plate && vehicles.find((x) => norm(x.plate) === norm(v.plate))) ||
       vehicles.find((x) => x.year === v.year && x.make.toLowerCase() === (v.make ?? "").toLowerCase() && x.model.toLowerCase() === (v.model ?? "").toLowerCase()) ||
       (!carSaid && vehicles.length === 1 ? vehicles[0] : null);
+    if (vin && vehicleMatch?.vin && vehicleMatch.vin !== vin.vin)
+      problems.push(`The ${vehicleMatch.year} ${vehicleMatch.model} on file has a different VIN (${vehicleMatch.vin}) than the photo.`);
   }
   let options: VehicleOption[] = [];
   let baseOption = -1;
   if (!vehicleMatch && carSaid) {
     if (ymm) {
       options = await optionSearch;
+      // The VIN pins down ALLDATA's exact vehicle and engine, so only those trims are offered.
+      const exact = options.filter((o) => vin?.acesVehicleIds.includes(String(o.acesVehicleId)) && (!vin.acesEngineIds.length || vin.acesEngineIds.includes(String(o.acesEngineId))));
+      if (exact.length) options = exact;
       if (!options.length) problems.push(`ALLDATA has no vehicle matching ${ymm}; the draft will have no vehicle.`);
-      baseOption = pickBaseTrim(options, text);
+      baseOption = pickBaseTrim(options, `${text} ${vin?.trim ?? ""}`);
     } else problems.push("Year, make and model weren't all given, so the draft will have no vehicle.");
   }
 
   return {
     customer: { firstName: customerMatch?.firstName ?? c.firstName ?? "", lastName: customerMatch?.lastName ?? c.lastName ?? "", phone, match: customerMatch },
-    vehicle: { year: v.year || "", make: v.make || "", model: v.model || "", plate: v.plate || null, mileage: v.mileage ?? null, match: vehicleMatch, options, baseOption },
+    vehicle: { year: v.year || "", make: v.make || "", model: v.model || "", plate: v.plate || null, mileage: v.mileage ?? null, vin, match: vehicleMatch, options, baseOption },
     problems,
   };
 }

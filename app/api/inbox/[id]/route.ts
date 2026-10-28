@@ -1,24 +1,18 @@
-import { deleteNote, getNote, markDone, readAudio } from "@/lib/inbox";
-import { sendText } from "@/lib/whatsapp";
+import { deleteNote, getNote, readMedia } from "@/lib/inbox";
 
 type Params = { params: Promise<{ id: string }> };
-const TYPES: Record<string, string> = { ogg: "audio/ogg", m4a: "audio/mp4", mp3: "audio/mpeg", wav: "audio/wav", webm: "audio/webm" };
+const TYPES: Record<string, string> = {
+  ogg: "audio/ogg", m4a: "audio/mp4", mp3: "audio/mpeg", wav: "audio/wav", webm: "audio/webm",
+  jpg: "image/jpeg", png: "image/png", webp: "image/webp",
+};
 
-// The note's audio, for the player on the review screen.
-export async function GET(_: Request, { params }: Params) {
+// The note's audio (or its photo with ?photo), for the review screen.
+export async function GET(req: Request, { params }: Params) {
   const note = await getNote((await params).id);
-  const audio = note && (await readAudio(note));
-  if (!audio) return new Response("Not found", { status: 404 });
-  return new Response(new Uint8Array(audio), { headers: { "content-type": TYPES[note.audio!.split(".").pop()!] ?? "audio/webm" } });
-}
-
-// Marks the note done once its draft exists, and tells the sender.
-export async function PATCH(req: Request, { params }: Params) {
-  const { documentId } = await req.json();
-  const note = await markDone((await params).id, Number(documentId));
-  if (!note) return Response.json({ error: "Note not found." }, { status: 404 });
-  if (/^\d+$/.test(note.from)) await sendText(note.from, `✅ Draft #${documentId} created in ALLDATA.`, note.via ?? undefined);
-  return Response.json(note);
+  const name = new URL(req.url).searchParams.has("photo") ? note?.image : note?.audio;
+  const data = name && (await readMedia(name).catch(() => null));
+  if (!data) return new Response("Not found", { status: 404 });
+  return new Response(new Uint8Array(data), { headers: { "content-type": TYPES[name.split(".").pop()!] ?? "application/octet-stream" } });
 }
 
 // "Dismiss" for notes that aren't a job, e.g. a greeting.

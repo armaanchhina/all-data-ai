@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 import type { Party, Review, ReviewItem } from "@/lib/extract";
-import type { Note } from "@/lib/inbox";
+import type { Note, Settings } from "@/lib/inbox";
 import type { DraftRequest, DraftResult } from "@/lib/alldata";
 
 // "16045551234" → "(604) 555-1234"; anything else (e.g. "upload") is shown as is.
@@ -28,14 +28,20 @@ export default function Home() {
   const [note, setNote] = useState<Note | null>(null);
   const [found, setFound] = useState<Party | null>(null);
   const lookupId = useRef(0);
+  const [settings, setSettings] = useState<Settings | null>(null);
 
   // Voice notes from WhatsApp show up here on their own.
   const loadNotes = () => fetch("/api/inbox").then((r) => r.json()).then(setNotes).catch(() => {});
   useEffect(() => {
     loadNotes();
+    fetch("/api/settings").then((r) => r.json()).then(setSettings).catch(() => {});
     const timer = setInterval(loadNotes, 4000);
     return () => clearInterval(timer);
   }, []);
+
+  async function setAutoCreate(autoCreate: boolean) {
+    setSettings(await fetch("/api/settings", { method: "POST", body: JSON.stringify({ autoCreate }) }).then((r) => r.json()));
+  }
 
   function openNote(n: Note) {
     setNote(n);
@@ -48,7 +54,7 @@ export default function Home() {
 
   async function uploadNote(file: File) {
     const form = new FormData();
-    form.append("audio", file);
+    form.append("file", file);
     await call("Uploading…", "/api/inbox", form, false);
     loadNotes();
   }
@@ -99,7 +105,7 @@ export default function Home() {
 
   async function analyse(input = text) {
     setResult(null);
-    const data = await call<Review>("Reading invoice details…", "/api/extract", JSON.stringify({ text: input }));
+    const data = await call<Review>("Reading invoice details…", "/api/extract", JSON.stringify({ text: input, vin: note?.vin ?? null }));
     if (data) {
       setReview(data);
       setTrim(data.vehicle.baseOption);
@@ -173,17 +179,18 @@ export default function Home() {
   async function create() {
     if (!review) return;
     const v = review.vehicle;
+    const vin = v.vin?.valid ? v.vin.vin : null; // a VIN that may be misread is never saved
     const draft: DraftRequest = {
       customer: review.customer.match ? { id: review.customer.match.id } : { firstName: review.customer.firstName, lastName: review.customer.lastName, phone: review.customer.phone },
-      vehicle: v.match ? { id: v.match.id } : option ? { option, plate: v.plate } : null,
+      vehicle: v.match ? { id: v.match.id, vin } : option ? { option, plate: v.plate, vin } : null,
       mileage: v.mileage,
       items: review.items.map(({ description, price, type }) => ({ description, price, type })),
     };
-    const data = await call<DraftResult>("Creating draft in ALLDATA…", "/api/create", JSON.stringify(draft));
+    // With a note, the server marks it done and tells the sender; it refuses a second draft for it.
+    const data = await call<DraftResult>("Creating draft in ALLDATA…", "/api/create", JSON.stringify({ ...draft, noteId: note?.id }));
     if (data) setResult(data);
     if (data && note) {
-      // Keep the note's new "done" status so it can't be turned into a second draft.
-      setNote(await fetch(`/api/inbox/${note.id}`, { method: "PATCH", body: JSON.stringify({ documentId: data.documentId }) }).then((r) => r.json()));
+      setNote({ ...note, status: "done", documentId: data.documentId });
       loadNotes();
     }
   }
@@ -191,13 +198,15 @@ export default function Home() {
   const noteCard = (n: Note) => (
     <button key={n.id} className={`note${note?.id === n.id ? " active" : ""}${n.status === "done" ? " done" : ""}`} disabled={n.status === "processing" || !!busy} onClick={() => openNote(n)}>
       <div className="note-top">
-        <span className="note-from">{n.audio ? "🎤" : "💬"} {phone(n.from)}</span>
+        <span className="note-from">{n.audio ? "🎤" : n.transcript ? "💬" : "📷"}{n.image && (n.audio || n.transcript) ? " 📷" : ""} {phone(n.from)}</span>
         <span className="note-time">{ago(n.receivedAt)}</span>
       </div>
-      <div className="note-text">{n.status === "processing" ? "Transcribing…" : n.error ?? n.transcript}</div>
+      <div className="note-text">{n.status === "processing" ? (n.audio ? "Transcribing…" : "Reading…") : n.error ?? n.transcript ?? (n.vin ? `Photo · VIN ${n.vin.vin}` : "Photo")}</div>
       {n.status === "processing" ? <span className="badge blue"><span className="spinner" /> Processing</span>
         : n.status === "done" ? <span className="badge green">✓ Draft #{n.documentId}</span>
         : n.error ? <span className="badge red">Needs attention</span>
+        : !n.transcript ? <span className="badge gray">Waiting for job details</span>
+        : n.held ? <span className="badge amber">Not auto-created</span>
         : <span className="badge amber">Ready to review</span>}
     </button>
   );
@@ -209,11 +218,24 @@ export default function Home() {
           <b>A.S Auto Repair</b>
           <span>Invoice Assistant</span>
         </div>
+        {settings && (
+          <div className="mode">
+            <div className="segmented">
+              <button className={settings.autoCreate ? "" : "on"} onClick={() => setAutoCreate(false)}>Review first</button>
+              <button className={settings.autoCreate ? "on" : ""} onClick={() => setAutoCreate(true)}>Create automatically</button>
+            </div>
+            <span className="sub">
+              {settings.autoCreate
+                ? "Clear WhatsApp notes become drafts right away. Anything unclear still waits here."
+                : "Every WhatsApp note waits here until someone clicks Create draft."}
+            </span>
+          </div>
+        )}
         <div className="inbox-head">
           <h2>Inbox {waiting.length > 0 && <span className="badge blue">{waiting.length}</span>}</h2>
-          <label className="btn ghost">
-            Upload audio
-            <input type="file" accept="audio/*" hidden onChange={(e) => { const f = e.target.files?.[0]; if (f) uploadNote(f); e.target.value = ""; }} />
+          <label className="btn ghost" title="Add a voice note or VIN photo by hand">
+            Upload
+            <input type="file" accept="audio/*,image/*" hidden onChange={(e) => { const f = e.target.files?.[0]; if (f) uploadNote(f); e.target.value = ""; }} />
           </label>
         </div>
         <div className="inbox-list">
@@ -234,7 +256,7 @@ export default function Home() {
           <section className="card">
             <div className="card-head">
               <div>
-                <h1>{note ? `${note.audio ? "Voice note" : "Text"} from ${phone(note.from)}` : "New invoice"}</h1>
+                <h1>{note ? `${note.audio ? "Voice note" : note.transcript ? "Text" : "Photo"} from ${phone(note.from)}` : "New invoice"}</h1>
                 <div className="sub">{note ? ago(note.receivedAt) : "Record or type the customer, car, mileage and repairs."}</div>
               </div>
               <div className="inline">
@@ -243,6 +265,11 @@ export default function Home() {
               </div>
             </div>
             {note?.audio && <audio controls src={`/api/inbox/${note.id}`} style={{ marginBottom: 10 }} />}
+            {note?.image && (
+              <a href={`/api/inbox/${note.id}?photo`} target="_blank" className="photo" title="Open full size">
+                <img src={`/api/inbox/${note.id}?photo`} alt="Photo sent with the note" />
+              </a>
+            )}
             <textarea
               className="field"
               value={text}
@@ -262,8 +289,9 @@ export default function Home() {
           </section>
 
           {error && <div className="callout red">{error}</div>}
+          {note?.held && note.status !== "done" && <div className="callout amber">Not created automatically: {note.held}</div>}
 
-          {!review && !result && !busy && !text && (
+          {!review && !result && !busy && !text && !note && (
             <div className="empty">
               <b>{waiting.length ? "Pick a voice note from the inbox" : "Nothing waiting"}</b>
               {waiting.length ? "Each one is already transcribed and ready to check." : "New WhatsApp voice notes will show up on the left."}
@@ -282,7 +310,7 @@ export default function Home() {
                         <span className="value">{review.customer.firstName} {review.customer.lastName}</span>
                         {review.customer.match.phone && <span className="sub" style={{ paddingTop: 7 }}>{phone(review.customer.match.phone)}</span>}
                         <span className="badge green" style={{ marginTop: 6 }}>✓ In ALLDATA</span>
-                        <button className="btn ghost" onClick={() => update((r) => { r.customer.match = null; })}>Change</button>
+                        <button className="btn ghost" onClick={() => update((r) => { r.customer.match = null; r.vehicle.match = null; })}>Change</button>
                       </div>
                     ) : (
                       <div className="row-body">
@@ -341,6 +369,23 @@ export default function Home() {
                     )}
                   </div>
 
+                  {(review.vehicle.vin || note?.image) && (
+                    <div className="row">
+                      <div className="row-label">VIN</div>
+                      {review.vehicle.vin ? (
+                        <div className="inline">
+                          <span className="value mono">{review.vehicle.vin.vin}</span>
+                          {!review.vehicle.vin.valid ? <span className="badge amber" style={{ marginTop: 6 }}>May be misread — won’t be saved</span>
+                            : review.vehicle.match?.vin === review.vehicle.vin.vin ? <span className="badge green" style={{ marginTop: 6 }}>✓ On file</span>
+                            : review.vehicle.match?.vin ? <span className="badge amber" style={{ marginTop: 6 }}>Car on file has a different VIN</span>
+                            : review.vehicle.match || option ? <span className="badge blue" style={{ marginTop: 6 }}>Will be saved to the vehicle</span>
+                            : <span className="badge gray" style={{ marginTop: 6 }}>Read from photo</span>}
+                          <button className="btn ghost" onClick={() => navigator.clipboard.writeText(review.vehicle.vin!.vin)}>Copy</button>
+                        </div>
+                      ) : <span className="sub" style={{ paddingTop: 7 }}>Couldn’t read a VIN from the photo.</span>}
+                    </div>
+                  )}
+
                   <div className="row">
                     <div className="row-label">Mileage in</div>
                     <div className="inline">
@@ -380,7 +425,7 @@ export default function Home() {
                           )}
                         </td>
                         <td className="num">
-                          <label className="price"><span>$</span><input inputMode="decimal" placeholder="0" value={item.price || ""} onChange={(e) => update((r) => { r.items[i].price = Number(e.target.value) || 0; })} /></label>
+                          <label className="price"><span>$</span><PriceInput value={item.price} onChange={(price) => update((r) => { r.items[i].price = price; })} /></label>
                         </td>
                         <td className="num" style={{ width: 36 }}>
                           <button className="icon-btn" title="Remove" onClick={() => update((r) => { r.items.splice(i, 1); })}>✕</button>
@@ -435,5 +480,20 @@ export default function Home() {
         </div>
       </main>
     </div>
+  );
+}
+
+// Keeps what is typed ("165.", "0.5") so cents can be entered; the number is passed up as it changes.
+function PriceInput({ value, onChange }: { value: number; onChange: (price: number) => void }) {
+  const [typed, setTyped] = useState(value ? String(value) : "");
+  useEffect(() => {
+    if ((Number(typed) || 0) !== value) setTyped(value ? String(value) : "");
+  }, [value]);
+  return (
+    <input inputMode="decimal" placeholder="0" value={typed} onChange={(e) => {
+      const t = e.target.value.replace(/[^\d.]/g, "");
+      setTyped(t);
+      onChange(Number(t) || 0);
+    }} />
   );
 }

@@ -10,14 +10,15 @@ const LINE = { part: 5, labor: 6, jobGroup: 20 } as const;
 
 export type ShopJob = { id: number; name: string; price: number };
 export type Customer = { id: number; firstName: string; lastName: string; phone: string | null };
-export type Vehicle = { id: number; year: string; make: string; model: string; trim: string | null; engine: string | null; plate: string | null };
+export type Vehicle = { id: number; year: string; make: string; model: string; trim: string | null; engine: string | null; plate: string | null; vin: string | null };
 export type VehicleOption = { year: string; make: string; model: string; trim: string; engine: string; acesVehicleId: string; acesEngineId: string; acesVehToEngCfgId: string };
 
 export type DraftItem = { description: string; price: number; type: "shopJob" | "newShopJob" | "part" | "labor" };
 export type NewCustomer = { firstName: string; lastName: string; phone: string | null };
 export type DraftRequest = {
   customer: { id: number } | NewCustomer;
-  vehicle: { id: number } | { option: VehicleOption; plate: string | null } | null;
+  // `vin` (read from a photo) is saved on the vehicle if it has none yet.
+  vehicle: ({ id: number } | { option: VehicleOption; plate: string | null }) & { vin?: string | null } | null;
   mileage: number | null;
   items: DraftItem[];
 };
@@ -36,9 +37,10 @@ const shared: { browser?: Browser; page?: Page; connecting?: Promise<Page>; cach
   ((globalThis as any).__alldata ??= { cache: new Map() });
 const LOGGED_OUT = "Not logged in to ALLDATA. Log in in the Chrome window, then try again.";
 
-// Requests that arrive together share one connection attempt.
+// Requests that arrive together share one connection attempt. API calls use the page's origin, so a
+// tab that was navigated away from ALLDATA is swapped for one that is on it.
 async function shopPage(): Promise<Page> {
-  if (shared.page && !shared.page.isClosed() && shared.browser?.isConnected()) return shared.page;
+  if (shared.page && !shared.page.isClosed() && shared.browser?.isConnected() && shared.page.url().includes("my.alldata.com")) return shared.page;
   return (shared.connecting ??= connect().finally(() => (shared.connecting = undefined)));
 }
 
@@ -57,7 +59,7 @@ async function api(page: Page, method: string, path: string, body?: unknown): Pr
   const res = await page.evaluate(async ({ url, method, body }) => {
     const r = await fetch(url, { method, headers: { accept: "application/json", "content-type": "application/json" }, body });
     return { ok: r.ok, status: r.status, text: await r.text() };
-  }, { url: API + path, method, body: body === undefined ? undefined : JSON.stringify(body) });
+  }, { url: path.startsWith("/ADAG/") ? path : API + path, method, body: body === undefined ? undefined : JSON.stringify(body) });
   if (res.status === 401 || res.status === 403) throw new Error(LOGGED_OUT);
   if (!res.ok) throw new Error(`ALLDATA ${method} ${path.split("?")[0]} returned ${res.status}: ${res.text.slice(0, 200)}`);
   try {
@@ -94,13 +96,15 @@ export function getShopJobs(): Promise<ShopJob[]> {
 // Matches names and phone numbers; most recently updated first.
 export async function findCustomers(search: string): Promise<Customer[]> {
   const data = await get(`/customers?page=0&paginationType=slices&sort=update%20date%20desc&search=${encodeURIComponent(search)}`);
-  return data.customers.map((c: any) => ({
-    id: c.customerId,
-    firstName: c.customerInfo.firstName ?? "",
-    lastName: c.customerInfo.lastName ?? "",
-    phone: c.customerInfo.contactMethods?.find((m: any) => m.preferred)?.value ?? null,
-  }));
+  return data.customers.map(toCustomer);
 }
+
+const toCustomer = (c: any): Customer => ({
+  id: c.customerId,
+  firstName: c.customerInfo.firstName ?? "",
+  lastName: c.customerInfo.lastName ?? "",
+  phone: c.customerInfo.contactMethods?.find((m: any) => m.preferred)?.value ?? null,
+});
 
 export function recentCustomerNames(): Promise<string[]> {
   return cached("customerNames", 10, async () => {
@@ -113,10 +117,27 @@ export async function getVehicles(customerId: number): Promise<Vehicle[]> {
   return (await rawVehicles(customerId)).map((v) => ({
     id: v.vehicleId, year: v.year, make: v.make, model: v.model,
     trim: v.acesTrimDesc ?? v.nonAcesTrimDesc, engine: v.engine, plate: v.licensePlate,
+    vin: v.vin?.toUpperCase() ?? null,
   }));
 }
 
 const rawVehicles = async (customerId: number): Promise<any[]> => (await get(`/customers/${customerId}/vehicles?pageSize=50&page=0`)).vehicles;
+
+// Shop Manager's own VIN decode: the exact ALLDATA vehicle and engine IDs the VIN can be.
+export async function decodeVin(vin: string): Promise<{ year: string; make: string; model: string; acesVehicleIds: string[]; acesEngineIds: string[] } | null> {
+  const r = (await get(`/ADAG/car-lookup/v3/vins/${vin}`)).results?.[0];
+  const ids = (names?: string[]) => (names ?? []).map((n) => n.split(":")[0].trim()); // "150128: 2003 Honda Accord EX CAN"
+  return r ? { year: r.year, make: r.make, model: r.model, acesVehicleIds: ids(r.acesVehicleNames), acesEngineIds: ids(r.acesEngineConfigNames) } : null;
+}
+
+// Every customer with a vehicle carrying this VIN (a car can be on file under more than one), most relevant first.
+export async function findByVin(vin: string): Promise<(Customer & { vehicleId: number })[]> {
+  const data = await get(`/vehicles?page=0&pageSize=20&search=${vin}`);
+  return (data.customers ?? []).flatMap((c: any) => {
+    const v = c.vehicles?.find((x: any) => x.vin?.toUpperCase() === vin);
+    return v ? [{ ...toCustomer(c), vehicleId: v.vehicleId }] : [];
+  });
+}
 
 export async function searchVehicleOptions(query: string): Promise<VehicleOption[]> {
   const data = await get(`/aces/search/${encodeURIComponent(query.toUpperCase())}`);
@@ -131,10 +152,11 @@ export async function searchVehicleOptions(query: string): Promise<VehicleOption
 export async function createDraft(req: DraftRequest): Promise<DraftResult> {
   const page = await shopPage();
 
+  const vin = req.vehicle?.vin ?? null;
   // Customer → vehicle has to run in order; the lines don't depend on it, so both run at once.
   const party = (async () => {
     const customerId = "id" in req.customer ? req.customer.id : await createCustomer(page, req.customer);
-    const vehicleId = !req.vehicle ? null : "id" in req.vehicle ? req.vehicle.id : await addVehicle(page, customerId, req.vehicle.option, req.vehicle.plate);
+    const vehicleId = !req.vehicle ? null : "id" in req.vehicle ? req.vehicle.id : await addVehicle(page, customerId, req.vehicle.option, req.vehicle.plate, vin);
     const [customer, vehicles] = await Promise.all([api(page, "GET", `/customers/${customerId}`), vehicleId ? rawVehicles(customerId) : []]);
     return { customer, v: vehicles.find((x) => x.vehicleId === vehicleId) ?? null };
   })();
@@ -142,6 +164,9 @@ export async function createDraft(req: DraftRequest): Promise<DraftResult> {
   const [{ customer, v }, lines] = await Promise.all([party, built]);
 
   const mileage = String(req.mileage ?? 0);
+  // A car on file without a VIN gets it the way Shop Manager's own "update the customer's vehicle too"
+  // does: in the same request as the draft, with the rest of the vehicle sent as it is so nothing is lost.
+  const storeVin = !!(v && vin && !v.vin);
   // The POST answers with the document as saved, so it is checked directly against what was sent.
   const saved = await api(page, "POST", "/documents?is_draft=true", {
     customer,
@@ -149,6 +174,8 @@ export async function createDraft(req: DraftRequest): Promise<DraftResult> {
       year: v.year, make: v.make, model: v.model, engine: v.engine, licensePlate: v.licensePlate, customerVehicleId: v.vehicleId, odometerCode: "KM",
       description: `${v.year} ${v.make} ${v.model}`, acesVehicleId: v.acesVehicleId, acesEngineId: v.acesEngineId,
       acesVehToEngCfgId: v.acesVehicleToEngineConfigId, acesTrimDesc: v.acesTrimDesc,
+      vin: v.vin ?? vin, licenseState: v.licenseState, color: v.color, alldataId: v.alldataId,
+      acesTransmissionId: v.acesTransmissionId, acesBodyConfigId: v.acesBodyConfigId, updateMasterRecord: storeVin,
     },
     mileageIn: mileage,
     mileageOut: mileage,
@@ -156,6 +183,10 @@ export async function createDraft(req: DraftRequest): Promise<DraftResult> {
   });
 
   const problems = lines.flatMap((l) => l.problems);
+  if (req.vehicle && !v) problems.push("The vehicle couldn't be added; add it on the draft in ALLDATA.");
+  if (v && vin && v.vin && v.vin.toUpperCase() !== vin) problems.push(`The vehicle on file has a different VIN (${v.vin}); it was left as is.`);
+  if (storeVin && (await rawVehicles(v.customerId)).find((x) => x.vehicleId === v.vehicleId)?.vin?.toUpperCase() !== vin)
+    problems.push(`The VIN ${vin} wasn't saved on the vehicle; add it in ALLDATA.`);
   const savedLines = (saved.datalines ?? []).map((l: any) => ({ description: String(l.description).trim(), total: l.total }));
   if (saved.state !== "Draft") problems.push(`Document state is ${saved.state}, expected Draft.`);
   for (const { expected: e } of lines) {
@@ -219,11 +250,11 @@ async function createCustomer(page: Page, c: NewCustomer): Promise<number> {
   return res.customerId;
 }
 
-async function addVehicle(page: Page, customerId: number, o: VehicleOption, plate: string | null): Promise<number> {
+async function addVehicle(page: Page, customerId: number, o: VehicleOption, plate: string | null, vin: string | null): Promise<number> {
   const [added] = await api(page, "POST", `/customers/${customerId}/vehicles`, [{
     acesId: null, alldataId: null, apply: true, customerVehicleId: 0, updateMasterRecord: true, color: "",
     year: o.year, make: o.make, model: o.model, engine: o.engine, description: `${o.year} ${o.make} ${o.model}`,
-    licensePlate: plate, odometerCode: "KM",
+    licensePlate: plate, odometerCode: "KM", vin,
     acesVehicleId: o.acesVehicleId, acesEngineId: o.acesEngineId, acesVehToEngCfgId: o.acesVehToEngCfgId, acesTrimDesc: o.trim,
   }]);
   return added.customerVehicleId;

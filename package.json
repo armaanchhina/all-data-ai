@@ -3,7 +3,9 @@
   "version": "1.0.0",
   "scripts": {
     "browser": "tsx scripts/browser.ts",
-    "dev": "next dev"
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start -H 127.0.0.1"
   },
   "dependencies": {
     "next": "^15.5.28",
