@@ -5,6 +5,7 @@ import OpenAI from "openai";
 import { findCustomers, getShopJobs, recentCustomerNames, getVehicles, searchVehicleOptions, type Customer, type DraftItem, type Vehicle, type VehicleOption } from "./alldata";
 
 const MODEL = process.env.OPENAI_MODEL ?? "gpt-4.1-mini";
+const openai = new OpenAI();
 
 type Extracted = {
   customer: { firstName: string | null; lastName: string | null; phone: string | null };
@@ -49,7 +50,6 @@ const schema = {
 
 export async function extract(text: string): Promise<Review> {
   const shopJobs = await getShopJobs();
-  const openai = new OpenAI();
   const res = await openai.chat.completions.create({
     model: MODEL,
     temperature: 0,
@@ -80,12 +80,27 @@ export async function extract(text: string): Promise<Review> {
 }
 
 async function resolve(data: Extracted, shopJobs: { name: string; price: number }[], text: string): Promise<Review> {
+  const { customer, vehicle, problems } = await matchParty(data.customer, data.vehicle, text);
+
+  const items: ReviewItem[] = data.items.map((i) => {
+    const name = i.shopJob ?? (i.newShopJob ? i.description : null);
+    const job = name ? shopJobs.find((j) => j.name.toLowerCase() === name.toLowerCase()) : undefined;
+    if (job) return { description: job.name, type: "shopJob", shopJobPrice: job.price, price: i.price ?? job.price };
+    const description = i.newShopJob ? i.description.replace(/\b\w/g, (ch) => ch.toUpperCase()) : i.description;
+    return { description, type: i.newShopJob ? "newShopJob" : i.kind, shopJobPrice: null, price: i.price ?? 0 };
+  });
+  return { customer, vehicle, items, problems };
+}
+
+export type Party = Pick<Review, "customer" | "vehicle"> & { problems: string[] };
+
+// Finds the customer and their vehicle in ALLDATA. Also re-run from the review screen when the
+// front desk types a name or phone that wasn't in the voice note.
+export async function matchParty(c: Partial<Extracted["customer"]>, v: Partial<Extracted["vehicle"]>, text: string): Promise<Party> {
   const problems: string[] = [];
-  const c = data.customer;
-  const fullName = [c.firstName, c.lastName].filter(Boolean).join(" ");
+  const fullName = [c.firstName, c.lastName].map((x) => x?.trim()).filter(Boolean).join(" ");
   const phone = c.phone?.replace(/\D/g, "") || null;
 
-  const v = data.vehicle;
   const carSaid = !!(v.year || v.make || v.model || v.plate);
   const ymm = v.year && v.make && v.model ? `${v.year} ${v.make} ${v.model}` : null;
   // Started now so it runs alongside the customer lookups; only used if the car isn't on file.
@@ -101,14 +116,17 @@ async function resolve(data: Extracted, shopJobs: { name: string; price: number 
     const loose = (s: string) => s.toLowerCase().replace(/[^a-z]/g, "").replace(/(.)\1+/g, "$1");
     return (await findCustomers(c.lastName)).filter((x) => loose(`${x.firstName}${x.lastName}`) === loose(fullName));
   };
-  const [byName, byPhone] = await Promise.all([nameSearch(), phone ? findCustomers(phone) : []]);
+  // Only a full number counts, compared on its last 10 digits so "+1 778…" and "778…" are the same.
+  const last10 = (s: string | null) => (s ?? "").replace(/\D/g, "").slice(-10);
+  const phoneSearch = async () => (phone && phone.length >= 10 ? (await findCustomers(last10(phone))).filter((x) => last10(x.phone) === last10(phone)) : []);
+  const [byName, byPhone] = await Promise.all([nameSearch(), phoneSearch()]);
   const customerMatch = byName.find((x) => byPhone.some((p) => p.id === x.id)) ?? byName[0] ?? byPhone[0] ?? null;
   if (byName.length > 1 && !byPhone.length) problems.push(`Several customers are named ${fullName}; picked the most recent.`);
 
   let vehicleMatch: Vehicle | null = null;
   if (customerMatch) {
     const vehicles = await getVehicles(customerMatch.id);
-    const norm = (s: string | null) => (s ?? "").replace(/\s/g, "").toUpperCase();
+    const norm = (s?: string | null) => (s ?? "").replace(/\s/g, "").toUpperCase();
     vehicleMatch =
       (v.plate && vehicles.find((x) => norm(x.plate) === norm(v.plate))) ||
       vehicles.find((x) => x.year === v.year && x.make.toLowerCase() === (v.make ?? "").toLowerCase() && x.model.toLowerCase() === (v.model ?? "").toLowerCase()) ||
@@ -124,19 +142,9 @@ async function resolve(data: Extracted, shopJobs: { name: string; price: number 
     } else problems.push("Year, make and model weren't all given, so the draft will have no vehicle.");
   }
 
-  const items: ReviewItem[] = data.items.map((i) => {
-    const name = i.shopJob ?? (i.newShopJob ? i.description : null);
-    const job = name ? shopJobs.find((j) => j.name.toLowerCase() === name.toLowerCase()) : undefined;
-    if (job) return { description: job.name, type: "shopJob", shopJobPrice: job.price, price: i.price ?? job.price };
-    const description = i.newShopJob ? i.description.replace(/\b\w/g, (ch) => ch.toUpperCase()) : i.description;
-    return { description, type: i.newShopJob ? "newShopJob" : i.kind, shopJobPrice: null, price: i.price ?? 0 };
-  });
-  if (!items.length) problems.push("No services found.");
-
   return {
     customer: { firstName: customerMatch?.firstName ?? c.firstName ?? "", lastName: customerMatch?.lastName ?? c.lastName ?? "", phone, match: customerMatch },
-    vehicle: { year: v.year ?? "", make: v.make ?? "", model: v.model ?? "", plate: v.plate, mileage: v.mileage, match: vehicleMatch, options, baseOption },
-    items,
+    vehicle: { year: v.year || "", make: v.make || "", model: v.model || "", plate: v.plate || null, mileage: v.mileage ?? null, match: vehicleMatch, options, baseOption },
     problems,
   };
 }
@@ -161,7 +169,6 @@ function pickBaseTrim(options: VehicleOption[], text: string): number {
 export async function transcribe(audio: File): Promise<string> {
   const [names, jobs] = await Promise.all([recentCustomerNames().catch(() => []), getShopJobs().catch(() => [])]);
   const prompt = `Auto repair invoice. Customers: ${[...new Set(names)].join(", ")}. Services: ${jobs.map((j) => j.name).join(", ")}.`;
-  const openai = new OpenAI();
   const res = await openai.audio.transcriptions.create({ file: audio, model: process.env.OPENAI_TRANSCRIBE_MODEL ?? "gpt-4o-mini-transcribe", prompt });
   return res.text;
 }

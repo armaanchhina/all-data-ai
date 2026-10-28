@@ -1,11 +1,19 @@
 "use client";
-import { useRef, useState } from "react";
-import type { Review, ReviewItem } from "@/lib/extract";
+import { useEffect, useRef, useState } from "react";
+import type { Party, Review, ReviewItem } from "@/lib/extract";
+import type { Note } from "@/lib/inbox";
 import type { DraftRequest, DraftResult } from "@/lib/alldata";
 
-const box: React.CSSProperties = { border: "1px solid #d5dae3", borderRadius: 8, padding: 16, marginTop: 16 };
-const button: React.CSSProperties = { padding: "10px 16px", borderRadius: 6, border: "none", background: "#2f6fd6", color: "white", fontSize: 15, cursor: "pointer" };
-const input: React.CSSProperties = { padding: 6, border: "1px solid #c3c9d4", borderRadius: 4, fontSize: 14 };
+// "16045551234" → "(604) 555-1234"; anything else (e.g. "upload") is shown as is.
+const phone = (s: string) => {
+  const d = s.replace(/\D/g, "").replace(/^1(?=\d{10}$)/, "");
+  return d.length === 10 ? `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}` : s;
+};
+const ago = (t: number) => {
+  const m = Math.round((Date.now() - t) / 60000);
+  return m < 1 ? "just now" : m < 60 ? `${m} min ago` : new Date(t).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+};
+const money = (n: number) => `$${n.toFixed(2)}`;
 
 export default function Home() {
   const [text, setText] = useState("");
@@ -16,6 +24,34 @@ export default function Home() {
   const [error, setError] = useState("");
   const [recording, setRecording] = useState(false);
   const recorder = useRef<MediaRecorder | null>(null);
+  const [notes, setNotes] = useState<Note[]>([]);
+  const [note, setNote] = useState<Note | null>(null);
+  const [found, setFound] = useState<Party | null>(null);
+  const lookupId = useRef(0);
+
+  // Voice notes from WhatsApp show up here on their own.
+  const loadNotes = () => fetch("/api/inbox").then((r) => r.json()).then(setNotes).catch(() => {});
+  useEffect(() => {
+    loadNotes();
+    const timer = setInterval(loadNotes, 4000);
+    return () => clearInterval(timer);
+  }, []);
+
+  function openNote(n: Note) {
+    setNote(n);
+    setResult(null);
+    setText(n.transcript ?? "");
+    setReview(n.review);
+    setTrim(n.review?.vehicle.baseOption ?? -1);
+    setError(n.error ?? "");
+  }
+
+  async function uploadNote(file: File) {
+    const form = new FormData();
+    form.append("audio", file);
+    await call("Uploading…", "/api/inbox", form, false);
+    loadNotes();
+  }
 
   async function call<T>(label: string, url: string, body: BodyInit, json = true): Promise<T | null> {
     setBusy(label);
@@ -55,6 +91,7 @@ export default function Home() {
       }
     };
     recorder.current = rec;
+    setNote(null);
     fetch("/api/warm", { method: "POST" }).catch(() => {});
     rec.start();
     setRecording(true);
@@ -69,6 +106,32 @@ export default function Home() {
     }
   }
 
+  // When a name or full phone number is typed for a new customer, look for them in ALLDATA first.
+  const c = review?.customer;
+  useEffect(() => {
+    setFound(null);
+    if (!review || !c || c.match) return;
+    const digits = (c.phone ?? "").replace(/\D/g, "");
+    if (c.lastName.trim().length < 2 && digits.length < 10) return;
+    const id = ++lookupId.current;
+    const timer = setTimeout(async () => {
+      const res = await fetch("/api/lookup", { method: "POST", body: JSON.stringify({ customer: c, vehicle: review.vehicle, text }) }).then((r) => r.json()).catch(() => null);
+      if (id === lookupId.current && res?.customer?.match) setFound(res);
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [c?.firstName, c?.lastName, c?.phone, c?.match]);
+
+  function applyFound() {
+    if (!found) return;
+    update((r) => {
+      r.customer = found.customer;
+      r.vehicle = { ...found.vehicle, mileage: r.vehicle.mileage };
+      r.problems = found.problems;
+    });
+    setTrim(found.vehicle.baseOption);
+    setFound(null);
+  }
+
   function update(fn: (r: Review) => void) {
     const copy = structuredClone(review!);
     fn(copy);
@@ -76,7 +139,22 @@ export default function Home() {
   }
 
   const option = review && !review.vehicle.match ? review.vehicle.options[trim] : undefined;
-  const blockers = review && !review.items.length ? ["Add at least one service."] : [];
+  const blocker =
+    note?.status === "done" ? `Already created as Draft #${note.documentId}.`
+    : !review?.items.length ? "Add at least one service."
+    : review.items.some((i) => !i.description.trim()) ? "Every service needs a name."
+    : null;
+  const waiting = notes.filter((n) => n.status !== "done");
+  const nextNote = waiting.find((n) => n.status === "ready" && n.id !== note?.id);
+  const subtotal = review?.items.reduce((sum, i) => sum + (i.price || 0), 0) ?? 0;
+
+  function reset() {
+    setResult(null);
+    setReview(null);
+    setText("");
+    setNote(null);
+    setError("");
+  }
 
   async function create() {
     if (!review) return;
@@ -89,135 +167,251 @@ export default function Home() {
     };
     const data = await call<DraftResult>("Creating draft in ALLDATA…", "/api/create", JSON.stringify(draft));
     if (data) setResult(data);
+    if (data && note) {
+      // Keep the note's new "done" status so it can't be turned into a second draft.
+      setNote(await fetch(`/api/inbox/${note.id}`, { method: "PATCH", body: JSON.stringify({ documentId: data.documentId }) }).then((r) => r.json()));
+      loadNotes();
+    }
   }
 
-  return (
-    <main>
-      <h1 style={{ fontSize: 26 }}>A.S Auto — AI Invoice Assistant</h1>
-
-      <div style={box}>
-        <textarea
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          rows={5}
-          placeholder="e.g. Armaan Chhina, 2016 Honda Civic, plate MJ8 9PC, 197899 km. Front brake pads 165, oil change 90, rear rotor 190."
-          style={{ ...input, width: "100%", boxSizing: "border-box", fontSize: 15 }}
-        />
-        <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
-          <button style={{ ...button, background: recording ? "#c93636" : "#4a5568" }} onClick={toggleRecording} disabled={!!busy}>
-            {recording ? "■ Stop" : "🎤 Record"}
-          </button>
-          <button style={button} onClick={() => analyse()} disabled={!text.trim() || !!busy || recording}>Review Invoice</button>
-        </div>
+  const noteCard = (n: Note) => (
+    <button key={n.id} className={`note${note?.id === n.id ? " active" : ""}${n.status === "done" ? " done" : ""}`} disabled={n.status === "processing" || !!busy} onClick={() => openNote(n)}>
+      <div className="note-top">
+        <span className="note-from">{n.audio ? "🎤" : "💬"} {phone(n.from)}</span>
+        <span className="note-time">{ago(n.receivedAt)}</span>
       </div>
+      <div className="note-text">{n.status === "processing" ? "Transcribing…" : n.error ?? n.transcript}</div>
+      {n.status === "processing" ? <span className="badge blue"><span className="spinner" /> Processing</span>
+        : n.status === "done" ? <span className="badge green">✓ Draft #{n.documentId}</span>
+        : n.error ? <span className="badge red">Needs attention</span>
+        : <span className="badge amber">Ready to review</span>}
+    </button>
+  );
 
-      {busy && <p>{busy}</p>}
-      {error && <p style={{ color: "#c93636" }}>{error}</p>}
+  return (
+    <div className="app">
+      <aside className="sidebar">
+        <div className="brand">
+          <b>A.S Auto Repair</b>
+          <span>Invoice Assistant</span>
+        </div>
+        <div className="inbox-head">
+          <h2>Inbox {waiting.length > 0 && <span className="badge blue">{waiting.length}</span>}</h2>
+          <label className="btn ghost">
+            Upload audio
+            <input type="file" accept="audio/*" hidden onChange={(e) => { const f = e.target.files?.[0]; if (f) uploadNote(f); e.target.value = ""; }} />
+          </label>
+        </div>
+        <div className="inbox-list">
+          {!notes.length && <div className="inbox-empty">No voice notes yet.<br />WhatsApp notes appear here automatically.</div>}
+          {waiting.map(noteCard)}
+          {notes.length > waiting.length && <div className="inbox-section">Completed</div>}
+          {notes.filter((n) => n.status === "done").map(noteCard)}
+        </div>
+      </aside>
 
-      {review && !result && (
-        <div style={box}>
-          <h2 style={{ marginTop: 0 }}>Review Invoice</h2>
+      <main className="main">
+        <div className="main-inner">
+          <section className="card">
+            <div className="card-head">
+              <div>
+                <h1>{note ? `${note.audio ? "Voice note" : "Text"} from ${phone(note.from)}` : "New invoice"}</h1>
+                <div className="sub">{note ? ago(note.receivedAt) : "Record or type the customer, car, mileage and repairs."}</div>
+              </div>
+              {(review || result) && <button className="btn" onClick={reset}>New invoice</button>}
+            </div>
+            {note?.audio && <audio controls src={`/api/inbox/${note.id}`} style={{ marginBottom: 10 }} />}
+            <textarea
+              className="field"
+              value={text}
+              onChange={(e) => setText(e.target.value)}
+              rows={3}
+              placeholder="e.g. Armaan Chhina, 2016 Honda Civic, plate MJ8 9PC, 197,899 km. Front brake pads 165, oil change, rear rotor 190."
+            />
+            <div className="inline" style={{ marginTop: 10 }}>
+              <button className={`btn ${recording ? "danger" : ""}`} onClick={toggleRecording} disabled={!!busy}>
+                {recording ? <><span className="rec-dot" /> Stop recording</> : "🎤 Record"}
+              </button>
+              <button className="btn primary" onClick={() => analyse()} disabled={!text.trim() || !!busy || recording}>
+                {review ? "Re-read text" : "Read invoice"}
+              </button>
+              {busy && <span className="status"><span className="spinner" /> {busy}</span>}
+            </div>
+          </section>
 
-          <p>
-            <b>Customer:</b>{" "}
-            {review.customer.match ? (
-              <>
-                {review.customer.firstName} {review.customer.lastName} <span style={{ color: "#2e7d32" }}>✓ existing ALLDATA customer</span>
-              </>
-            ) : (
-              <>
-                <input style={{ ...input, width: 110 }} placeholder="First name" value={review.customer.firstName} onChange={(e) => update((r) => { r.customer.firstName = e.target.value; })} />{" "}
-                <input style={{ ...input, width: 130 }} placeholder="Last name (Unknown)" value={review.customer.lastName} onChange={(e) => update((r) => { r.customer.lastName = e.target.value; })} />{" "}
-                · phone <input style={{ ...input, width: 130 }} value={review.customer.phone ?? ""} onChange={(e) => update((r) => { r.customer.phone = e.target.value || null; })} />{" "}
-                <span style={{ color: "#b26a00" }}>new — will be created</span>
-              </>
-            )}
-          </p>
+          {error && <div className="callout red">{error}</div>}
 
-          <p>
-            <b>Vehicle:</b>{" "}
-            {review.vehicle.match ? (
-              <>
-                {review.vehicle.match.year} {review.vehicle.match.make} {review.vehicle.match.model} {review.vehicle.match.trim} {review.vehicle.match.plate && `· ${review.vehicle.match.plate}`}{" "}
-                <span style={{ color: "#2e7d32" }}>✓ on file</span>
-              </>
-            ) : !review.vehicle.options.length ? (
-              <span style={{ color: "#6b7280" }}>none — add it on the draft</span>
-            ) : (
-              <>
-                {review.vehicle.year} {review.vehicle.make} {review.vehicle.model} · plate{" "}
-                <input style={{ ...input, width: 100 }} value={review.vehicle.plate ?? ""} onChange={(e) => update((r) => { r.vehicle.plate = e.target.value.toUpperCase() || null; })} />{" "}
-                {option && <span style={{ color: "#b26a00" }}>new — will be added</span>}
-                <br />
-                <select style={{ ...input, marginTop: 8, maxWidth: "100%" }} value={trim} onChange={(e) => setTrim(Number(e.target.value))}>
-                  <option value={-1}>No vehicle</option>
-                  {review.vehicle.options.map((o, i) => <option key={i} value={i}>{o.trim} — {o.engine}</option>)}
-                </select>
-                {trim >= 0 && trim === review.vehicle.baseOption && <span style={{ color: "#6b7280" }}> picked automatically — change if needed</span>}
-              </>
-            )}
-          </p>
-
-          <p>
-            <b>Mileage In:</b>{" "}
-            <input style={{ ...input, width: 110 }} value={review.vehicle.mileage ?? ""} onChange={(e) => update((r) => { r.vehicle.mileage = e.target.value ? Number(e.target.value.replace(/\D/g, "")) : null; })} />
-          </p>
-
-          <table style={{ width: "100%", borderCollapse: "collapse", marginTop: 8 }}>
-            <thead>
-              <tr style={{ textAlign: "left", borderBottom: "1px solid #d5dae3" }}>
-                <th>Service</th><th>Added as</th><th style={{ textAlign: "right" }}>Price</th><th />
-              </tr>
-            </thead>
-            <tbody>
-              {review.items.map((item, i) => (
-                <tr key={i} style={{ borderBottom: "1px solid #eef0f4" }}>
-                  <td style={{ padding: "6px 0" }}>{item.description}</td>
-                  <td>
-                    {item.type === "shopJob" ? (
-                      <>Shop Job <span style={{ color: "#6b7280" }}>(${item.shopJobPrice?.toFixed(2)})</span></>
-                    ) : (
-                      <select style={input} value={item.type} onChange={(e) => update((r) => { r.items[i].type = e.target.value as ReviewItem["type"]; })}>
-                        <option value="newShopJob">New Shop Job</option>
-                        <option value="part">Custom part</option>
-                        <option value="labor">Custom labour</option>
-                      </select>
-                    )}
-                  </td>
-                  <td style={{ textAlign: "right" }}>
-                    $<input style={{ ...input, width: 80, textAlign: "right" }} value={item.price || ""} placeholder="0" onChange={(e) => update((r) => { r.items[i].price = Number(e.target.value) || 0; })} />
-                  </td>
-                  <td style={{ textAlign: "right" }}>
-                    <button style={{ border: "none", background: "none", cursor: "pointer", color: "#6b7280" }} onClick={() => update((r) => { r.items.splice(i, 1); })}>✕</button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-
-          {[...review.problems, ...blockers].length > 0 && (
-            <ul style={{ color: "#b26a00" }}>{[...new Set([...review.problems, ...blockers])].map((p) => <li key={p}>{p}</li>)}</ul>
+          {!review && !result && !busy && !text && (
+            <div className="empty">
+              <b>{waiting.length ? "Pick a voice note from the inbox" : "Nothing waiting"}</b>
+              {waiting.length ? "Each one is already transcribed and ready to check." : "New WhatsApp voice notes will show up on the left."}
+            </div>
           )}
 
-          <button style={{ ...button, marginTop: 12, opacity: blockers.length ? 0.5 : 1 }} disabled={blockers.length > 0 || !!busy} onClick={create}>
-            Create Draft in ALLDATA
-          </button>
-        </div>
-      )}
+          {review && !result && (
+            <>
+              <section className="card">
+                <div className="card-head"><h2>Review</h2></div>
+                <div className="rows">
+                  <div className="row">
+                    <div className="row-label">Customer</div>
+                    {review.customer.match ? (
+                      <div className="inline">
+                        <span className="value">{review.customer.firstName} {review.customer.lastName}</span>
+                        {review.customer.match.phone && <span className="sub" style={{ paddingTop: 7 }}>{phone(review.customer.match.phone)}</span>}
+                        <span className="badge green" style={{ marginTop: 6 }}>✓ In ALLDATA</span>
+                        <button className="btn ghost" onClick={() => update((r) => { r.customer.match = null; })}>Change</button>
+                      </div>
+                    ) : (
+                      <div className="row-body">
+                        <div className="inline">
+                          <input className="field" style={{ flex: 1 }} placeholder="First name" value={review.customer.firstName} onChange={(e) => update((r) => { r.customer.firstName = e.target.value; })} />
+                          <input className="field" style={{ flex: 1 }} placeholder="Last name" value={review.customer.lastName} onChange={(e) => update((r) => { r.customer.lastName = e.target.value; })} />
+                          <input className="field" style={{ flex: 1 }} placeholder="Phone" value={review.customer.phone ?? ""} onChange={(e) => update((r) => { r.customer.phone = e.target.value || null; })} />
+                        </div>
+                        {found?.customer.match && (
+                          <div className="callout blue inline" style={{ justifyContent: "space-between" }}>
+                            <span>
+                              Found in ALLDATA: <b>{found.customer.match.firstName} {found.customer.match.lastName}</b>
+                              {found.customer.match.phone && ` · ${phone(found.customer.match.phone)}`}
+                              {found.vehicle.match && ` · ${found.vehicle.match.year} ${found.vehicle.match.make} ${found.vehicle.match.model}`}
+                            </span>
+                            <button className="btn primary" onClick={applyFound}>Use this customer</button>
+                          </div>
+                        )}
+                        <div className="inline">
+                          <span className="badge amber">New customer</span>
+                          <span className="sub">{review.customer.lastName.trim() ? "Will be created in ALLDATA." : "No last name — will be created as “Unknown”."}</span>
+                        </div>
+                      </div>
+                    )}
+                  </div>
 
-      {result && (
-        <div style={{ ...box, borderColor: result.problems.length ? "#c93636" : "#2e7d32" }}>
-          <h2 style={{ marginTop: 0, color: result.problems.length ? "#c93636" : "#2e7d32" }}>
-            {result.problems.length ? "Draft created, but it doesn't match" : "✓ Draft created and verified in ALLDATA"}
-          </h2>
-          <p>Draft #{result.documentId} · {result.customer} · {result.vehicle ?? "No vehicle"} · Mileage {result.mileage?.toLocaleString() ?? "—"}</p>
-          <ul>{result.lines.map((l, i) => <li key={i}>{l.description} — ${l.total.toFixed(2)}</li>)}</ul>
-          <p><b>Total (with supplies & tax): ${result.total.toFixed(2)}</b></p>
-          {result.problems.length > 0 && <ul style={{ color: "#c93636" }}>{result.problems.map((p) => <li key={p}>{p}</li>)}</ul>}
-          <p style={{ color: "#6b7280" }}>Left as a Draft. Review and finalize it in ALLDATA yourself.</p>
-          <button style={button} onClick={() => { setResult(null); setReview(null); setText(""); }}>New invoice</button>
+                  <div className="row">
+                    <div className="row-label">Vehicle</div>
+                    {review.vehicle.match ? (
+                      <div className="inline">
+                        <span className="value">{review.vehicle.match.year} {review.vehicle.match.make} {review.vehicle.match.model} {review.vehicle.match.trim}</span>
+                        {review.vehicle.match.plate && <span className="sub" style={{ paddingTop: 7 }}>{review.vehicle.match.plate}</span>}
+                        <span className="badge green" style={{ marginTop: 6 }}>✓ On file</span>
+                      </div>
+                    ) : !review.vehicle.options.length ? (
+                      <div className="inline">
+                        {review.vehicle.model && <span className="value">{review.vehicle.year} {review.vehicle.make} {review.vehicle.model}</span>}
+                        <span className="badge gray" style={{ marginTop: 6 }}>{review.vehicle.model ? "Not found in ALLDATA" : "No vehicle"}</span>
+                        <span className="sub" style={{ paddingTop: 7 }}>Add it on the draft in ALLDATA.</span>
+                      </div>
+                    ) : (
+                      <div className="row-body">
+                        <div className="inline">
+                          <span className="value" style={{ paddingTop: 0 }}>{review.vehicle.year} {review.vehicle.make} {review.vehicle.model}</span>
+                          {option ? <span className="badge amber">New vehicle</span> : <span className="badge gray">Not added</span>}
+                        </div>
+                        <div className="inline">
+                          <select className="field" style={{ flex: 2 }} value={trim} onChange={(e) => setTrim(Number(e.target.value))}>
+                            <option value={-1}>Don’t add a vehicle</option>
+                            {review.vehicle.options.map((o, i) => <option key={i} value={i}>{o.trim} — {o.engine}</option>)}
+                          </select>
+                          <input className="field" style={{ flex: 1 }} placeholder="Plate" value={review.vehicle.plate ?? ""} onChange={(e) => update((r) => { r.vehicle.plate = e.target.value.toUpperCase() || null; })} />
+                        </div>
+                        {trim >= 0 && trim === review.vehicle.baseOption && <span className="sub">Trim picked automatically — change it if needed.</span>}
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="row">
+                    <div className="row-label">Mileage in</div>
+                    <div className="inline">
+                      <input className="field" style={{ width: 160 }} inputMode="numeric" placeholder="—" value={review.vehicle.mileage?.toLocaleString() ?? ""} onChange={(e) => update((r) => { const d = e.target.value.replace(/\D/g, ""); r.vehicle.mileage = d ? Number(d) : null; })} />
+                      <span className="sub">km</span>
+                    </div>
+                  </div>
+                </div>
+              </section>
+
+              <section className="card">
+                <div className="card-head">
+                  <h2>Services</h2>
+                  <button className="btn ghost" onClick={() => update((r) => { r.items.push({ description: "", type: "part", price: 0, shopJobPrice: null }); })}>+ Add service</button>
+                </div>
+                <table className="services">
+                  <thead>
+                    <tr><th>Service</th><th>Added as</th><th className="num">Price</th><th /></tr>
+                  </thead>
+                  <tbody>
+                    {review.items.map((item, i) => (
+                      <tr key={i}>
+                        <td style={{ width: "45%" }}>
+                          {item.type === "shopJob" ? <b>{item.description}</b> : (
+                            <input className="field" placeholder="Service name" value={item.description} onChange={(e) => update((r) => { r.items[i].description = e.target.value; })} />
+                          )}
+                        </td>
+                        <td>
+                          {item.type === "shopJob" ? (
+                            <span className="badge green">Shop Job · {money(item.shopJobPrice ?? 0)}</span>
+                          ) : (
+                            <select className="field" value={item.type} onChange={(e) => update((r) => { r.items[i].type = e.target.value as ReviewItem["type"]; })}>
+                              <option value="newShopJob">New Shop Job</option>
+                              <option value="part">Custom part</option>
+                              <option value="labor">Custom labour</option>
+                            </select>
+                          )}
+                        </td>
+                        <td className="num">
+                          <label className="price"><span>$</span><input inputMode="decimal" placeholder="0" value={item.price || ""} onChange={(e) => update((r) => { r.items[i].price = Number(e.target.value) || 0; })} /></label>
+                        </td>
+                        <td className="num" style={{ width: 36 }}>
+                          <button className="icon-btn" title="Remove" onClick={() => update((r) => { r.items.splice(i, 1); })}>✕</button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {!review.items.length && <div className="sub" style={{ padding: "8px 0" }}>No services yet.</div>}
+                <div className="subtotal">
+                  <span className="sub">Subtotal before shop supplies and tax</span>
+                  <b>{money(subtotal)}</b>
+                </div>
+                {review.items.some((i) => i.type === "newShopJob") && (
+                  <div className="callout blue" style={{ marginTop: 12 }}>“New Shop Job” adds the service to the shop’s Shop Job list permanently. Use Custom part/labour for one-offs.</div>
+                )}
+              </section>
+
+              {review.problems.length > 0 && (
+                <div className="callout amber"><ul>{review.problems.map((p) => <li key={p}>{p}</li>)}</ul></div>
+              )}
+
+              <div className="actions">
+                <span className="sub">{blocker ?? "Creates a Draft only — finish it in ALLDATA."}</span>
+                <button className="btn primary big" disabled={!!blocker || !!busy} onClick={create}>
+                  {busy.startsWith("Creating") ? <><span className="spinner" /> Creating…</> : "Create draft"}
+                </button>
+              </div>
+            </>
+          )}
+
+          {result && (
+            <section className="card">
+              <div className="result-head">
+                <div className={`check ${result.problems.length ? "warn" : "ok"}`}>{result.problems.length ? "!" : "✓"}</div>
+                <div>
+                  <h2 style={{ margin: 0, fontSize: 18 }}>{result.problems.length ? "Draft created — please check it" : `Draft #${result.documentId} created`}</h2>
+                  <div className="sub">{result.customer} · {result.vehicle ?? "No vehicle"}{result.mileage ? ` · ${result.mileage.toLocaleString()} km` : ""}</div>
+                </div>
+              </div>
+              <ul className="lines">
+                {result.lines.map((l, i) => <li key={i}><span>{l.description}</span><span>{money(l.total)}</span></li>)}
+                <li><b>Total with shop supplies & tax</b><b>{money(result.total)}</b></li>
+              </ul>
+              {result.problems.length > 0 && <div className="callout red" style={{ marginTop: 12 }}><ul>{result.problems.map((p) => <li key={p}>{p}</li>)}</ul></div>}
+              <div className="inline" style={{ marginTop: 16, justifyContent: "space-between" }}>
+                <span className="sub">Left as a Draft — finalize it in ALLDATA.</span>
+                {nextNote ? <button className="btn primary" onClick={() => openNote(nextNote)}>Next voice note →</button> : <button className="btn" onClick={reset}>New invoice</button>}
+              </div>
+            </section>
+          )}
         </div>
-      )}
-    </main>
+      </main>
+    </div>
   );
 }

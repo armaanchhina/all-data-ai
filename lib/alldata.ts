@@ -32,12 +32,17 @@ export type DraftResult = {
 };
 
 // Kept on globalThis so every API route (each its own bundle in Next) shares one connection and cache.
-const shared: { browser?: Browser; page?: Page; cache: Map<string, { at: number; value: Promise<any> }> } =
+const shared: { browser?: Browser; page?: Page; connecting?: Promise<Page>; cache: Map<string, { at: number; value: Promise<any> }> } =
   ((globalThis as any).__alldata ??= { cache: new Map() });
 const LOGGED_OUT = "Not logged in to ALLDATA. Log in in the Chrome window, then try again.";
 
+// Requests that arrive together share one connection attempt.
 async function shopPage(): Promise<Page> {
   if (shared.page && !shared.page.isClosed() && shared.browser?.isConnected()) return shared.page;
+  return (shared.connecting ??= connect().finally(() => (shared.connecting = undefined)));
+}
+
+async function connect(): Promise<Page> {
   const browser = await chromium.connectOverCDP(CDP_URL).catch(() => {
     throw new Error("ALLDATA browser is not running. Start it with `npm run browser` and log in.");
   });
