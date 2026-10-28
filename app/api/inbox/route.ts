@@ -1,7 +1,13 @@
-import { addNote, listNotes } from "@/lib/inbox";
+import { addNote, clearDone, listNotes } from "@/lib/inbox";
 
 export async function GET() {
   return Response.json(await listNotes());
+}
+
+// "Clear" on the Completed list.
+export async function DELETE() {
+  await clearDone();
+  return Response.json({ ok: true });
 }
 
 // Adds a voice note by upload: for testing without WhatsApp, or notes received another way.

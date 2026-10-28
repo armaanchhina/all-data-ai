@@ -119,14 +119,28 @@ export async function matchParty(c: Partial<Extracted["customer"]>, v: Partial<E
   // Only a full number counts, compared on its last 10 digits so "+1 778…" and "778…" are the same.
   const last10 = (s: string | null) => (s ?? "").replace(/\D/g, "").slice(-10);
   const phoneSearch = async () => (phone && phone.length >= 10 ? (await findCustomers(last10(phone))).filter((x) => last10(x.phone) === last10(phone)) : []);
-  const [byName, byPhone] = await Promise.all([nameSearch(), phoneSearch()]);
-  const customerMatch = byName.find((x) => byPhone.some((p) => p.id === x.id)) ?? byName[0] ?? byPhone[0] ?? null;
+  // A plate belongs to one car, so it finds the customer when name and phone don't. ALLDATA's search
+  // only matches the spacing it has stored, so try the common spellings, then confirm on the vehicle.
+  const norm = (s?: string | null) => (s ?? "").replace(/\s/g, "").toUpperCase();
+  const plateSearch = async (): Promise<Customer[]> => {
+    const p = norm(v.plate);
+    if (p.length < 4) return [];
+    const spellings = [...new Set([v.plate!.trim().toUpperCase(), p, `${p.slice(0, 3)} ${p.slice(3)}`, `${p.slice(0, 4)} ${p.slice(4)}`])];
+    const found = (await Promise.all(spellings.map(findCustomers))).flat();
+    const unique = found.filter((x, i) => found.findIndex((y) => y.id === x.id) === i);
+    // Placeholder "Unknown" customers (made when no name was given) only win if nobody else has the plate.
+    unique.sort((a, b) => Number(a.lastName === "Unknown") - Number(b.lastName === "Unknown"));
+    for (const c of unique)
+      if ((await getVehicles(c.id)).some((x) => norm(x.plate) === p)) return [c];
+    return [];
+  };
+  const [byName, byPhone, byPlate] = await Promise.all([nameSearch(), phoneSearch(), plateSearch()]);
+  const customerMatch = byName.find((x) => byPhone.some((p) => p.id === x.id)) ?? byName[0] ?? byPhone[0] ?? byPlate[0] ?? null;
   if (byName.length > 1 && !byPhone.length) problems.push(`Several customers are named ${fullName}; picked the most recent.`);
 
   let vehicleMatch: Vehicle | null = null;
   if (customerMatch) {
     const vehicles = await getVehicles(customerMatch.id);
-    const norm = (s?: string | null) => (s ?? "").replace(/\s/g, "").toUpperCase();
     vehicleMatch =
       (v.plate && vehicles.find((x) => norm(x.plate) === norm(v.plate))) ||
       vehicles.find((x) => x.year === v.year && x.make.toLowerCase() === (v.make ?? "").toLowerCase() && x.model.toLowerCase() === (v.model ?? "").toLowerCase()) ||

@@ -16,7 +16,7 @@ Keep the Chrome window open while using the app; requests go through its logged-
 Say the customer name and/or phone, car, plate, mileage and repairs. Anything can be left out — the goal is a quick draft the owner finishes in ALLDATA.
 
 - `lib/extract.ts` — OpenAI turns the text into customer / vehicle / repairs, then matches them against live ALLDATA data:
-  - **Customer** by name, phone, or both. Not found → a new customer is created (named "Unknown" if no name was said). A name or phone typed on the review screen is looked up in ALLDATA before a new customer is made.
+  - **Customer** by name, phone or licence plate (name and phone win; a plate match is confirmed on the car). Not found → a new customer is created (named "Unknown" if no name was said). A name, phone or plate typed on the review screen is looked up in ALLDATA before a new customer is made.
   - **Vehicle** by plate or year/make/model on that customer (or their only vehicle if no car was said). New year/make/model → added with the base trim. Not enough info → the draft has no vehicle.
   - **Repairs** → an existing Shop Job, a **new Shop Job** for common services, otherwise a custom part / labour line. Changeable on the review screen.
   - **Prices** → what was said, else the Shop Job price, else $0.

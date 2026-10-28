@@ -1,4 +1,4 @@
-import { getNote, markDone, readAudio } from "@/lib/inbox";
+import { deleteNote, getNote, markDone, readAudio } from "@/lib/inbox";
 import { sendText } from "@/lib/whatsapp";
 
 type Params = { params: Promise<{ id: string }> };
@@ -19,4 +19,10 @@ export async function PATCH(req: Request, { params }: Params) {
   if (!note) return Response.json({ error: "Note not found." }, { status: 404 });
   if (/^\d+$/.test(note.from)) await sendText(note.from, `✅ Draft #${documentId} created in ALLDATA.`, note.via ?? undefined);
   return Response.json(note);
+}
+
+// "Dismiss" for notes that aren't a job, e.g. a greeting.
+export async function DELETE(_: Request, { params }: Params) {
+  await deleteNote((await params).id);
+  return Response.json({ ok: true });
 }

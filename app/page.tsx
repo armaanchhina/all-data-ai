@@ -106,20 +106,21 @@ export default function Home() {
     }
   }
 
-  // When a name or full phone number is typed for a new customer, look for them in ALLDATA first.
+  // When a name, full phone number or plate is typed for a new customer, look for them in ALLDATA first.
   const c = review?.customer;
   useEffect(() => {
     setFound(null);
     if (!review || !c || c.match) return;
     const digits = (c.phone ?? "").replace(/\D/g, "");
-    if (c.lastName.trim().length < 2 && digits.length < 10) return;
+    const plate = (review.vehicle.plate ?? "").replace(/\s/g, "");
+    if (c.lastName.trim().length < 2 && digits.length < 10 && plate.length < 4) return;
     const id = ++lookupId.current;
     const timer = setTimeout(async () => {
       const res = await fetch("/api/lookup", { method: "POST", body: JSON.stringify({ customer: c, vehicle: review.vehicle, text }) }).then((r) => r.json()).catch(() => null);
       if (id === lookupId.current && res?.customer?.match) setFound(res);
     }, 500);
     return () => clearTimeout(timer);
-  }, [c?.firstName, c?.lastName, c?.phone, c?.match]);
+  }, [c?.firstName, c?.lastName, c?.phone, c?.match, review?.vehicle.plate]);
 
   function applyFound() {
     if (!found) return;
@@ -147,6 +148,19 @@ export default function Home() {
   const waiting = notes.filter((n) => n.status !== "done");
   const nextNote = waiting.find((n) => n.status === "ready" && n.id !== note?.id);
   const subtotal = review?.items.reduce((sum, i) => sum + (i.price || 0), 0) ?? 0;
+
+  async function dismissNote() {
+    if (!note || !confirm("Remove this message from the inbox?")) return;
+    await fetch(`/api/inbox/${note.id}`, { method: "DELETE" });
+    reset();
+    loadNotes();
+  }
+
+  async function clearCompleted() {
+    await fetch("/api/inbox", { method: "DELETE" });
+    if (note?.status === "done") reset();
+    loadNotes();
+  }
 
   function reset() {
     setResult(null);
@@ -205,7 +219,12 @@ export default function Home() {
         <div className="inbox-list">
           {!notes.length && <div className="inbox-empty">No voice notes yet.<br />WhatsApp notes appear here automatically.</div>}
           {waiting.map(noteCard)}
-          {notes.length > waiting.length && <div className="inbox-section">Completed</div>}
+          {notes.length > waiting.length && (
+            <div className="inbox-section inline" style={{ justifyContent: "space-between" }}>
+              Completed
+              <button className="btn ghost" style={{ fontSize: 12, padding: "2px 6px" }} onClick={clearCompleted}>Clear</button>
+            </div>
+          )}
           {notes.filter((n) => n.status === "done").map(noteCard)}
         </div>
       </aside>
@@ -218,7 +237,10 @@ export default function Home() {
                 <h1>{note ? `${note.audio ? "Voice note" : "Text"} from ${phone(note.from)}` : "New invoice"}</h1>
                 <div className="sub">{note ? ago(note.receivedAt) : "Record or type the customer, car, mileage and repairs."}</div>
               </div>
-              {(review || result) && <button className="btn" onClick={reset}>New invoice</button>}
+              <div className="inline">
+                {note && note.status !== "done" && <button className="btn" onClick={dismissNote}>Dismiss</button>}
+                {(review || result) && <button className="btn" onClick={reset}>New invoice</button>}
+              </div>
             </div>
             {note?.audio && <audio controls src={`/api/inbox/${note.id}`} style={{ marginBottom: 10 }} />}
             <textarea

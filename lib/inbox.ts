@@ -65,7 +65,7 @@ async function prepare(note: Note, audio: File | null) {
     note.error = e.message;
   }
   note.status = "ready";
-  await save(note);
+  if (await getNote(note.id)) await save(note); // unless it was dismissed while processing
 }
 
 export async function readAudio(note: Note): Promise<Buffer | null> {
@@ -78,4 +78,17 @@ export async function markDone(id: string, documentId: number): Promise<Note | n
   Object.assign(note, { status: "done", documentId });
   await save(note);
   return note;
+}
+
+// Removes a note and its audio. Drafts already created in ALLDATA are not touched.
+export async function deleteNote(id: string) {
+  const note = await getNote(id);
+  if (!note) return;
+  await fs.rm(file(note.id), { force: true });
+  if (note.audio) await fs.rm(path.join(DIR, path.basename(note.audio)), { force: true });
+}
+
+export async function clearDone() {
+  const names = (await fs.readdir(DIR).catch(() => [])).filter((n) => n.endsWith(".json"));
+  for (const n of names) if ((await getNote(n.slice(0, -5)))?.status === "done") await deleteNote(n.slice(0, -5));
 }
