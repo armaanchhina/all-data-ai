@@ -1,4 +1,4 @@
-import { addNote, getSettings } from "@/lib/inbox";
+import { addNote, getSettings, saveSettings } from "@/lib/inbox";
 import { downloadMedia, isAllowed, sendText, validSignature } from "@/lib/whatsapp";
 
 // Meta's one-time webhook check when the URL is saved in the developer console.
@@ -29,9 +29,18 @@ export async function POST(req: Request) {
       // A voice note, a photo (e.g. the VIN sticker) or a text with the job details. A photo's caption
       // counts as the text; short replies like "ok" or "thanks" are skipped.
       const raw: string = m.type === "text" ? m.text.body : m.type === "image" ? m.image.caption ?? "" : "";
+      // "enable" turns on the review step on the web page; "disable" goes back to straight-to-ALLDATA.
+      const command = m.type === "text" ? raw.trim().toLowerCase() : "";
+      if (command === "enable" || command === "disable") {
+        await saveSettings({ autoCreate: command === "disable" });
+        await sendText(m.from, command === "enable"
+          ? "🔒 Review on: notes wait on the web page until the front desk clicks Create draft. Text \"disable\" to turn it off."
+          : "⚡ Review off: notes go straight into ALLDATA as drafts. Text \"enable\" to check them first.", via);
+        continue;
+      }
       const text = raw.trim().split(/\s+/).length >= 4 ? raw.trim() : undefined;
       if (m.type !== "audio" && m.type !== "image" && !text) {
-        await sendText(m.from, "Send a voice note or text with the customer, car, mileage and repairs. You can add a photo of the VIN sticker.", via);
+        await sendText(m.from, "Send a voice note or text with the customer, car, mileage and repairs. You can add a photo of the VIN sticker. Text \"enable\" or \"disable\" to turn the front-desk review on or off.", via);
         continue;
       }
       try {

@@ -32,10 +32,12 @@ export default function Home() {
 
   // Voice notes from WhatsApp show up here on their own.
   const loadNotes = () => fetch("/api/inbox").then((r) => r.json()).then(setNotes).catch(() => {});
+  // The mode can also be changed by texting "enable" / "disable", so it is refreshed with the inbox.
+  const loadSettings = () => fetch("/api/settings").then((r) => r.json()).then(setSettings).catch(() => {});
   useEffect(() => {
     loadNotes();
-    fetch("/api/settings").then((r) => r.json()).then(setSettings).catch(() => {});
-    const timer = setInterval(loadNotes, 4000);
+    loadSettings();
+    const timer = setInterval(() => (loadNotes(), loadSettings()), 4000);
     return () => clearInterval(timer);
   }, []);
 

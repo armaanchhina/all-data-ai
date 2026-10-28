@@ -33,9 +33,9 @@ export type DraftResult = {
 };
 
 // Kept on globalThis so every API route (each its own bundle in Next) shares one connection and cache.
-const shared: { browser?: Browser; page?: Page; connecting?: Promise<Page>; cache: Map<string, { at: number; value: Promise<any> }> } =
+const shared: { browser?: Browser; page?: Page; connecting?: Promise<Page>; loggingIn?: Promise<void>; cache: Map<string, { at: number; value: Promise<any> }> } =
   ((globalThis as any).__alldata ??= { cache: new Map() });
-const LOGGED_OUT = "Not logged in to ALLDATA. Log in in the Chrome window, then try again.";
+const LOGGED_OUT = "Not logged in to ALLDATA. Log in in the Chrome window (or set ALL_DATA_USER and ALL_DATA_PASSWORD), then try again.";
 
 // Requests that arrive together share one connection attempt. API calls use the page's origin, so a
 // tab that was navigated away from ALLDATA is swapped for one that is on it.
@@ -44,30 +44,90 @@ async function shopPage(): Promise<Page> {
   return (shared.connecting ??= connect().finally(() => (shared.connecting = undefined)));
 }
 
+// Reuses the tab already in use (even if it ended up on the login screen), else one on Shop Manager.
 async function connect(): Promise<Page> {
-  const browser = await chromium.connectOverCDP(CDP_URL).catch(() => {
-    throw new Error("ALLDATA browser is not running. Start it with `npm run browser` and log in.");
-  });
-  const ctx = browser.contexts()[0];
-  const page = ctx.pages().find((p) => p.url().includes("my.alldata.com/shop_manager")) ?? (await ctx.newPage());
+  let page = shared.browser?.isConnected() && shared.page && !shared.page.isClosed() ? shared.page : null;
+  if (!page) {
+    const browser = await chromium.connectOverCDP(CDP_URL).catch(() => {
+      throw new Error("ALLDATA browser is not running. Start it with `npm run browser` and log in.");
+    });
+    const ctx = browser.contexts()[0];
+    page = ctx.pages().find((p) => p.url().includes("my.alldata.com/shop_manager")) ?? ctx.pages().find((p) => p.url().includes("my.alldata.com")) ?? (await ctx.newPage());
+    Object.assign(shared, { browser, page });
+  }
   if (!page.url().includes("/shop_manager")) await page.goto(`${SHOP_MANAGER}/home`);
-  Object.assign(shared, { browser, page });
   return page;
 }
 
-async function api(page: Page, method: string, path: string, body?: unknown): Promise<any> {
-  const res = await page.evaluate(async ({ url, method, body }) => {
+async function api(page: Page, method: string, path: string, body?: unknown, retry = true): Promise<any> {
+  let res: { ok: boolean; status: number; text: string } | null = null;
+  try {
+    // Off ALLDATA (e.g. sent to a login page elsewhere) counts as logged out.
+    if (page.url().includes("my.alldata.com")) res = await call(page, method, path, body);
+  } catch (e) {
+    // A login started by another request navigated the tab mid-request. Only a GET is repeated: a
+    // POST may have gone through before the page changed.
+    if (retry && method === "GET" && shared.loggingIn) return shared.loggingIn.then(() => api(page, method, path, body, false));
+    throw e;
+  }
+  let data: any;
+  const loggedOut = !res || res.status === 401 || res.status === 403 || (res.ok && !parses(res.text, (d) => (data = d)));
+  if (loggedOut) {
+    // Logged out (ALLDATA expires the session about once a day): log in again and repeat the request.
+    if (retry) return login(page).then(() => api(page, method, path, body, false));
+    throw new Error(LOGGED_OUT);
+  }
+  if (!res!.ok) throw new Error(`ALLDATA ${method} ${path.split("?")[0]} returned ${res!.status}: ${res!.text.slice(0, 200)}`);
+  return data;
+}
+
+const call = (page: Page, method: string, path: string, body?: unknown) =>
+  page.evaluate(async ({ url, method, body }) => {
     const r = await fetch(url, { method, headers: { accept: "application/json", "content-type": "application/json" }, body });
     return { ok: r.ok, status: r.status, text: await r.text() };
   }, { url: path.startsWith("/ADAG/") ? path : API + path, method, body: body === undefined ? undefined : JSON.stringify(body) });
-  if (res.status === 401 || res.status === 403) throw new Error(LOGGED_OUT);
-  if (!res.ok) throw new Error(`ALLDATA ${method} ${path.split("?")[0]} returned ${res.status}: ${res.text.slice(0, 200)}`);
+
+// A logged-out session gets the HTML login page instead of JSON.
+function parses(text: string, use: (data: any) => void): boolean {
   try {
-    return res.text ? JSON.parse(res.text) : null;
+    use(text ? JSON.parse(text) : null);
+    return true;
   } catch {
-    throw new Error(LOGGED_OUT); // a logged-out session gets the HTML login page instead of JSON
+    return false;
   }
 }
+
+// With ALL_DATA_USER and ALL_DATA_PASSWORD in .env.local, an expired session logs back in by itself,
+// in the same Chrome window (ALLDATA rejects automated browsers, not this one). Works with the
+// username and password on one screen or on two. Requests that hit it together share one login.
+function login(page: Page): Promise<void> {
+  const username = process.env.ALL_DATA_USER, password = process.env.ALL_DATA_PASSWORD;
+  if (!username || !password) return Promise.reject(new Error(LOGGED_OUT));
+  return (shared.loggingIn ??= (async () => {
+    await page.goto(`${SHOP_MANAGER}/home`);
+    if (await signedIn(page)) return; // already back, e.g. another tab logged in
+    const pass = page.locator('input[type="password"]:visible');
+    const user = page.locator('input[type="email"]:visible, input[type="text"]:visible').first();
+    await page.locator('input[type="password"]:visible, input[type="email"]:visible, input[type="text"]:visible').first().waitFor({ timeout: 30_000 });
+    if (!(await pass.count())) {
+      await user.fill(username);
+      await user.press("Enter");
+      await pass.waitFor({ timeout: 30_000 });
+    } else if (await user.count()) await user.fill(username);
+    await pass.fill(password);
+    await pass.press("Enter");
+    await pass.waitFor({ state: "hidden", timeout: 30_000 }).catch(() => {}); // the login screen goes away
+    if (!page.url().includes("/shop_manager")) await page.goto(`${SHOP_MANAGER}/home`);
+    if (!(await signedIn(page))) throw new Error("ALLDATA login didn't work. Check ALL_DATA_USER and ALL_DATA_PASSWORD, or log in in the Chrome window.");
+    console.log("ALLDATA: logged back in.");
+  })().finally(() => (shared.loggingIn = undefined)));
+}
+
+const signedIn = async (page: Page) => {
+  if (!page.url().includes("my.alldata.com")) return false;
+  const res = await call(page, "GET", "/shop_jobs?pageSize=1&page=0").catch(() => null);
+  return !!res?.ok && parses(res.text, () => {});
+};
 
 const get = async (path: string) => api(await shopPage(), "GET", path);
 

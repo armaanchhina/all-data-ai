@@ -37,7 +37,8 @@ export type Note = {
 export type Settings = { autoCreate: boolean };
 
 export async function getSettings(): Promise<Settings> {
-  return { autoCreate: false, ...JSON.parse(await fs.readFile(SETTINGS, "utf8").catch(() => "{}")) };
+  // Straight to ALLDATA unless someone turned on the review step (web page toggle or "enable" on WhatsApp).
+  return { autoCreate: true, ...JSON.parse(await fs.readFile(SETTINGS, "utf8").catch(() => "{}")) };
 }
 
 export async function saveSettings(settings: Settings) {
