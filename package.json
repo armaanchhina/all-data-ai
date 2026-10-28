@@ -1,0 +1,22 @@
+{
+  "name": "all-data-ai",
+  "version": "1.0.0",
+  "scripts": {
+    "browser": "tsx scripts/browser.ts",
+    "dev": "next dev"
+  },
+  "dependencies": {
+    "next": "^15.5.28",
+    "openai": "^6.49.0",
+    "playwright": "^1.64.1",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "@types/react": "^19.3.0",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3"
+  },
+  "private": true
+}

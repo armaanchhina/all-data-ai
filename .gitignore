@@ -1,0 +1,6 @@
+node_modules
+.next
+.browser-profile
+.env.local
+debug
+tsconfig.tsbuildinfo
