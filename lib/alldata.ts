@@ -305,8 +305,10 @@ async function line(page: Page, lineNumber: number, item: DraftItem) {
   };
 }
 
+// manualPriceRate: the price as said. Without it ALLDATA prices the line from its cost through the shop's
+// price matrix, and with no cost that comes out at $0.
 const customLine = (lineNumber: number, lineTypeId: number, description: string, price: number) =>
-  ({ lineNumber, lineTypeId, description, priceRate: price, quantityOrHours: 1, taxable: true, children: [] });
+  ({ lineNumber, lineTypeId, description, priceRate: price, total: price, manualPriceRate: true, quantityOrHours: 1, taxable: true, children: [] });
 
 async function createCustomer(page: Page, c: NewCustomer): Promise<number> {
   const phone = c.phone?.replace(/\D/g, "");
