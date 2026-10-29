@@ -169,7 +169,10 @@ function autoBlocker(r: Review): string | null {
   if (!r.items.length) return "No services were mentioned.";
   if (r.items.some((i) => !i.description.trim())) return "A service has no name.";
   if (r.problems.length) return r.problems[0];
-  if (!r.customer.match && !r.customer.lastName.trim() && !r.customer.phone) return "No customer name or phone was given.";
+  // Mechanics often say only the car; the draft then has no customer and the front desk adds one in
+  // ALLDATA. With no car either, there's nothing to tell the job apart by.
+  const car = r.vehicle.match || r.vehicle.options[r.vehicle.baseOption];
+  if (!r.customer.match && !r.customer.lastName.trim() && !r.customer.phone && !car) return "No customer or car was given.";
   return null;
 }
 
@@ -180,7 +183,9 @@ function autoDraft(r: Review): DraftRequest {
   const option = v.match ? undefined : v.options[v.baseOption];
   const vin = v.vin?.valid ? v.vin.vin : null;
   return {
-    customer: r.customer.match ? { id: r.customer.match.id } : { firstName: r.customer.firstName, lastName: r.customer.lastName, phone: r.customer.phone },
+    customer: r.customer.match ? { id: r.customer.match.id }
+      : r.customer.firstName.trim() || r.customer.lastName.trim() || r.customer.phone ? { firstName: r.customer.firstName, lastName: r.customer.lastName, phone: r.customer.phone }
+      : null,
     vehicle: v.match ? { id: v.match.id, vin } : option ? { option, plate: v.plate, vin } : null,
     mileage: v.mileage,
     items: r.items.map(({ description, price, type }) => ({ description, price, type: type === "newShopJob" ? "part" : type })),
@@ -204,7 +209,7 @@ export async function createFromNote(id: string, draft: DraftRequest): Promise<D
 }
 
 const draftMessage = (r: DraftResult) =>
-  `✅ Draft #${r.documentId} created in ALLDATA: ${[r.customer || "no name", r.vehicle].filter(Boolean).join(" · ")}, ` +
+  `✅ Draft #${r.documentId} created in ALLDATA: ${[r.customer || "no customer", r.vehicle].filter(Boolean).join(" · ")}, ` +
   `${r.lines.length} service${r.lines.length === 1 ? "" : "s"}, $${r.total.toFixed(2)}.` +
   (r.problems.length ? `\n⚠️ Please check: ${r.problems.join(" ")}` : "");
 

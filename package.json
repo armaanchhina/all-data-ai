@@ -5,7 +5,8 @@
     "browser": "tsx scripts/browser.ts",
     "dev": "next dev",
     "build": "next build",
-    "start": "next start -H 127.0.0.1"
+    "start": "next start -H 127.0.0.1",
+    "tunnel": "cloudflared tunnel --config cloudflared.yml run"
   },
   "dependencies": {
     "next": "^15.5.28",

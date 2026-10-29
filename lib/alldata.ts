@@ -16,7 +16,7 @@ export type VehicleOption = { year: string; make: string; model: string; trim: s
 export type DraftItem = { description: string; price: number; type: "shopJob" | "newShopJob" | "part" | "labor" };
 export type NewCustomer = { firstName: string; lastName: string; phone: string | null };
 export type DraftRequest = {
-  customer: { id: number } | NewCustomer;
+  customer: { id: number } | NewCustomer | null; // null: no customer was said, so the draft has none
   // `vin` (read from a photo) is saved on the vehicle if it has none yet.
   vehicle: ({ id: number } | { option: VehicleOption; plate: string | null }) & { vin?: string | null } | null;
   mileage: number | null;
@@ -214,7 +214,19 @@ export async function createDraft(req: DraftRequest): Promise<DraftResult> {
 
   const vin = req.vehicle?.vin ?? null;
   // Customer → vehicle has to run in order; the lines don't depend on it, so both run at once.
-  const party = (async () => {
+  const party = (async (): Promise<{ customer: any; v: any }> => {
+    // No customer said: the draft goes in without one (Shop Manager allows that), and the car goes on it
+    // straight from ALLDATA's vehicle list instead of being added to a customer.
+    if (!req.customer) {
+      const o = req.vehicle && "option" in req.vehicle ? req.vehicle : null;
+      return {
+        customer: null,
+        v: o && {
+          vehicleId: 0, year: o.option.year, make: o.option.make, model: o.option.model, engine: o.option.engine, licensePlate: o.plate, vin,
+          acesVehicleId: o.option.acesVehicleId, acesEngineId: o.option.acesEngineId, acesVehicleToEngineConfigId: o.option.acesVehToEngCfgId, acesTrimDesc: o.option.trim,
+        },
+      };
+    }
     const customerId = "id" in req.customer ? req.customer.id : await createCustomer(page, req.customer);
     const vehicleId = !req.vehicle ? null : "id" in req.vehicle ? req.vehicle.id : await addVehicle(page, customerId, req.vehicle.option, req.vehicle.plate, vin);
     const [customer, vehicles] = await Promise.all([api(page, "GET", `/customers/${customerId}`), vehicleId ? rawVehicles(customerId) : []]);
@@ -255,10 +267,10 @@ export async function createDraft(req: DraftRequest): Promise<DraftResult> {
     else if (Math.abs(line.total - e.total) > 0.005) problems.push(`"${e.description}" saved at $${line.total}, expected $${e.total}.`);
   }
 
-  const info = customer.customerInfo;
+  const info = customer?.customerInfo;
   return {
     documentId: saved.documentId,
-    customer: `${info.firstName ?? ""} ${info.lastName ?? ""}`.trim(),
+    customer: info ? `${info.firstName ?? ""} ${info.lastName ?? ""}`.trim() : "",
     vehicle: v && `${v.year} ${v.make} ${v.model}${v.acesTrimDesc ? " " + v.acesTrimDesc : ""}${v.licensePlate ? " · " + v.licensePlate : ""}`,
     mileage: saved.mileageIn ?? null,
     lines: savedLines,

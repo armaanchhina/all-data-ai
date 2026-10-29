@@ -1,0 +1,8 @@
+# Fixed address for Meta's WhatsApp webhook: https://whatsapp.trydoorstep.ca/api/whatsapp
+# The tunnel's credentials are in ~/.cloudflared/<tunnel id>.json (created by `cloudflared tunnel create`).
+# Only the webhook is reachable through it; middleware.ts answers 404 to everything else.
+tunnel: 6a258180-212f-4562-b430-935fca08cf3b
+ingress:
+  - hostname: whatsapp.trydoorstep.ca
+    service: http://127.0.0.1:3000
+  - service: http_status:404

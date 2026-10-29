@@ -183,7 +183,9 @@ export default function Home() {
     const v = review.vehicle;
     const vin = v.vin?.valid ? v.vin.vin : null; // a VIN that may be misread is never saved
     const draft: DraftRequest = {
-      customer: review.customer.match ? { id: review.customer.match.id } : { firstName: review.customer.firstName, lastName: review.customer.lastName, phone: review.customer.phone },
+      customer: review.customer.match ? { id: review.customer.match.id }
+        : review.customer.firstName.trim() || review.customer.lastName.trim() || review.customer.phone ? { firstName: review.customer.firstName, lastName: review.customer.lastName, phone: review.customer.phone }
+        : null,
       vehicle: v.match ? { id: v.match.id, vin } : option ? { option, plate: v.plate, vin } : null,
       mileage: v.mileage,
       items: review.items.map(({ description, price, type }) => ({ description, price, type })),
@@ -332,8 +334,11 @@ export default function Home() {
                           </div>
                         )}
                         <div className="inline">
-                          <span className="badge amber">New customer</span>
-                          <span className="sub">{review.customer.lastName.trim() ? "Will be created in ALLDATA." : "No last name — will be created as “Unknown”."}</span>
+                          {!review.customer.firstName.trim() && !review.customer.lastName.trim() && !review.customer.phone ? (
+                            <><span className="badge gray">No customer</span><span className="sub">The draft is left without one; add it in ALLDATA.</span></>
+                          ) : (
+                            <><span className="badge amber">New customer</span><span className="sub">{review.customer.lastName.trim() ? "Will be created in ALLDATA." : "No last name — will be created as “Unknown”."}</span></>
+                          )}
                         </div>
                       </div>
                     )}
@@ -465,7 +470,7 @@ export default function Home() {
                 <div className={`check ${result.problems.length ? "warn" : "ok"}`}>{result.problems.length ? "!" : "✓"}</div>
                 <div>
                   <h2 style={{ margin: 0, fontSize: 18 }}>{result.problems.length ? "Draft created — please check it" : `Draft #${result.documentId} created`}</h2>
-                  <div className="sub">{result.customer} · {result.vehicle ?? "No vehicle"}{result.mileage ? ` · ${result.mileage.toLocaleString()} km` : ""}</div>
+                  <div className="sub">{result.customer || "No customer"} · {result.vehicle ?? "No vehicle"}{result.mileage ? ` · ${result.mileage.toLocaleString()} km` : ""}</div>
                 </div>
               </div>
               <ul className="lines">
