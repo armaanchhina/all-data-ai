@@ -161,7 +161,8 @@ async function prepare(id: string, run: number) {
     await save(note);
   });
   if (created) await reply(note, draftMessage(created));
-  else if (note.held) await reply(note, `📝 Left for the front desk to check: ${note.held}`);
+  // The full reason (an ALLDATA error can quote prices) is on the web page; the technician gets the gist.
+  else if (note.held) await reply(note, `📝 Left for the front desk to check: ${note.held.startsWith("Auto-create failed") ? "it couldn't be created automatically." : note.held}`);
 }
 
 // Anything a person should look at keeps the note in the inbox instead of creating the draft.
@@ -208,10 +209,12 @@ export async function createFromNote(id: string, draft: DraftRequest): Promise<D
   return result;
 }
 
+// Technicians see what was created but never prices; the draft's own warnings (which quote prices)
+// stay on the web page and in ALLDATA.
 const draftMessage = (r: DraftResult) =>
   `✅ Draft #${r.documentId} created in ALLDATA: ${[r.customer || "no customer", r.vehicle].filter(Boolean).join(" · ")}, ` +
-  `${r.lines.length} service${r.lines.length === 1 ? "" : "s"}, $${r.total.toFixed(2)}.` +
-  (r.problems.length ? `\n⚠️ Please check: ${r.problems.join(" ")}` : "");
+  `${r.lines.length} service${r.lines.length === 1 ? "" : "s"}: ${r.lines.map((l) => l.description).join(", ")}.` +
+  (r.problems.length ? "\n⚠️ The front desk will double-check it in ALLDATA." : "");
 
 // Notes added by upload have no phone number to answer.
 const reply = (note: Note, text: string) => (/^\d+$/.test(note.from) ? sendText(note.from, text, note.via ?? undefined) : Promise.resolve());
