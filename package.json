@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start -H 127.0.0.1",
-    "tunnel": "cloudflared tunnel --config cloudflared.yml run"
+    "tunnel": "cloudflared tunnel --config cloudflared.yml run",
+    "shop": "tsx scripts/shop.ts"
   },
   "dependencies": {
     "next": "^15.5.28",
