@@ -9,7 +9,7 @@ Speak or type invoice details → review → creates a **draft** in ALLDATA Shop
 3. `npm run browser` — opens Chrome with a local profile (`.browser-profile/`). Log in to ALLDATA there once.
 4. `npm run build && npm start` — open http://localhost:3000 (`npm run dev` while developing)
 
-Or `npm run shop` does steps 3–4 and the WhatsApp tunnel (`npm run tunnel`) in one terminal: it builds, then starts Chrome, the app and the tunnel. Ctrl+C stops all three, and if one of them stops, the others stop too.
+Or `npm run shop` does steps 3–4 and the WhatsApp tunnel (`npm run tunnel`) in one terminal: it builds, then starts Chrome, the app and the tunnel. Ctrl+C (or launchd's stop) stops all three. If the app or the tunnel stops, everything stops with a non-zero exit, so launchd's `KeepAlive` starts it all again. Chrome is looked after instead: if it is closed, crashes or stops responding for 30 seconds, it is reopened (checked every 10 seconds, at most once every 30), and the app reconnects to it by itself. Close the ALLDATA Chrome before starting, or it is used as is and not restarted if it freezes.
 
 Keep the Chrome window open while using the app; requests go through its logged-in session. To have it log back in by itself when ALLDATA's session expires (about once a day), add `ALL_DATA_USER=...` and `ALL_DATA_PASSWORD=...` to `.env.local`; it fills in the login in that same Chrome window.
 
